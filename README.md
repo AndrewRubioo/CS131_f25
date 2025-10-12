@@ -1,4 +1,4 @@
-git pull --rebase origin main# Project Starter
+# Project Starter
 
 This repository provides:
 1. The necessary environment to run your interpreter solution inside of
