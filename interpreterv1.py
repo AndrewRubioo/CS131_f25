@@ -122,7 +122,7 @@ class Interpreter(InterpreterBase):
 			right_val = self.evaluate_expression(expression_node.dict['op2'])
 
 			#type check step
-			if not isinstance(left_val, int) or not isinstance(left_val, int):
+			if not isinstance(left_val, int) or not isinstance(right_val, int):
 				super().error(ErrorType.TYPE_ERROR, "Incompatible types for arithmetic operation")
 			
 			if node_type == '+':
@@ -132,7 +132,7 @@ class Interpreter(InterpreterBase):
 				return left_val - right_val
 
 		if node_type == 'fcall':
-				return self.fcall_expression(expression_node)
+			return self.fcall_expression(expression_node)
 
 class Function:
     #Class to represent functions in Brewin
