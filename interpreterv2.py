@@ -128,7 +128,7 @@ class Interpreter(InterpreterBase):
         condition_expr = statement.get("condition")
         condition_value = self.__eval_expr(condition_expr)
 
-        if not isinstance(condition_expr, bool):
+        if not isinstance(condition_value, bool):
             super().error(ErrorType.TYPE_ERROR, "Statement conditiion must be a boolean")
 
         if condition_value:
