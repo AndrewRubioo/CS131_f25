@@ -66,7 +66,7 @@ class Interpreter(InterpreterBase):
             pass
 
     def __run_function(self, name, actual_args):
-        #function to create new scope for every function call
+        # function to create new scope for every function call
         func_ast = self.__get_function(name, len(actual_args))
 
         caller_env = self.env
@@ -119,7 +119,7 @@ class Interpreter(InterpreterBase):
         return_value = self.NIL_VALUE
 
         if expression:
-            return_value = self.__eval_expression(expression)
+            return_value = self.__eval_expr(expression)
 
         raise Return_Exception(return_value)
     
@@ -147,12 +147,12 @@ class Interpreter(InterpreterBase):
         loop_statements = statement.get("statements")
 
         while True:
-            conditon_value = self.__eval_expr(condition_expr)
+            condition_value = self.__eval_expr(condition_expr)
 
-            if not isinstance(conditon_value, bool):
+            if not isinstance(condition_value, bool):
                 super().error(ErrorType.TYPE_ERROR, "While statement condition must be a boolean")
 
-            if not conditon_value:
+            if not condition_value:
                 break
             
             for stmt in loop_statements:
@@ -251,7 +251,7 @@ class Interpreter(InterpreterBase):
             operand_value = self.__eval_expr(expr.get("op1"))
             return self.__eval_unary_op(kind, operand_value)
 
-        #handle binary ops
+        # handle binary ops
         elif kind in self.ops:
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
             return self.__eval_binary_op(kind, l, r)
@@ -260,22 +260,26 @@ class Interpreter(InterpreterBase):
     def __eval_binary_op(self, op, l_val, r_val):
 
         def check_types(type_name, type_class):
-            if not isinstance(l_val, type_class) or not isinstance(r_val, type_class):
-                super().error(ErrorType.TYPE_ERROR, f"Operands for {op} must be two {type_name}s")
+            if type(l_val) != type_class or type(r_val) != type_class:
+                self.error(ErrorType.TYPE_ERROR, f"Operands for {op} must be two {type_name}s")
         
-        # Equality
+        # equality
         if op == "==":
-            return self.__eval_binary_op("==", l_val, r_val)
+            if l_val is self.NIL_VALUE and r_val is self.NIL_VALUE:
+                return True
+            if type(l_val) != type(r_val): # type check with helper
+                return False
+            return l_val == r_val
         
         if op == "!=":
             return not self.__eval_binary_op("==", l_val, r_val) # opposite of ==
 
-        if op == "+" and isinstance(l_val, str):
-            if not isinstance(r_val, str):
-                 super().error(ErrorType.TYPE_ERROR, "Operands for '+' must be two integers or two strings")
+        if op == "+" and type(l_val) == str:
+            if type(r_val) != str:
+                super().error(ErrorType.TYPE_ERROR, "Operands for '+' must be two integers or two strings")
             return l_val + r_val
 
-        # Integer Arithmetic (+, -, *, /)
+        # integer arithmetic (+, -, *, /)
         if op in ("+", "-", "*", "/"):
             check_types("integer", int)
             if op == "+": 
@@ -287,7 +291,7 @@ class Interpreter(InterpreterBase):
             if op == "/": # floor division
                 return l_val // r_val
 
-        # Integer Comparison (<, <=, >, >=)
+        # integer comparison (<, <=, >, >=)
         if op in ("<", "<=", ">", ">="):
             # These are illegal for different types[cite: 786].
             check_types("integer", int) 
@@ -300,7 +304,7 @@ class Interpreter(InterpreterBase):
             if op == ">=": 
                 return l_val >= r_val
 
-        # Boolean Logical (&&, ||)
+        # boolean logical (&&, ||)
         if op in ("&&", "||"):
             check_types("boolean", bool)
             if op == "&&": 
@@ -308,24 +312,23 @@ class Interpreter(InterpreterBase):
             if op == "||": 
                 return l_val or r_val
 
-        # If we get here, the types were incompatible for the operator
+        # if we get here, the types were incompatible for the operator
         super().error(ErrorType.TYPE_ERROR, f"Incompatible types ({type(l_val)}, {type(r_val)}) for operator '{op}'")
             
     def __eval_unary_op(self, op, op_val):
 
         if op == 'neg':
-            if not isinstance(op_val, int):
+            if type(op_val) != int:
                 super().error(ErrorType.TYPE_ERROR, "Operand for arithmetic negation must be integer")
             return -op_val
         
         elif op == '!': 
-            if not isinstance(op_val, bool):
+            if type(op_val) != bool:
                 super().error(ErrorType.TYPE_ERROR, "Operand dor logical NOT '!' must be boolean")
             return not op_val
         
         super().error(ErrorType.TYPE_ERROR, f"{op}")
 
-    
 
 def main():
     interpreter = Interpreter()
