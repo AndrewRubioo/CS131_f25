@@ -66,7 +66,7 @@ class Interpreter(InterpreterBase):
             pass
 
     def __run_function(self, name, actual_args):
-        #look up function def
+        #function to create new scope for every function call
         func_ast = self.__get_function(name, len(actual_args))
 
         caller_env = self.env
@@ -101,10 +101,10 @@ class Interpreter(InterpreterBase):
             self.__run_assign(statement)
 
         elif kind == self.FCALL_NODE:
-            self.__run_assign(statement)
+            self.__run_fcall(statement)
 
         elif kind == self.RETURN_NODE:
-            self.__run_assign(statement)
+            self.__run_return(statement)
 
         elif kind == self.IF_NODE:
             self.__run_if(statement)
@@ -149,7 +149,7 @@ class Interpreter(InterpreterBase):
         while True:
             conditon_value = self.__eval_expr(condition_expr)
 
-            if not isinstance(condition_expr, bool):
+            if not isinstance(conditon_value, bool):
                 super().error(ErrorType.TYPE_ERROR, "While statement condition must be a boolean")
 
             if not conditon_value:
@@ -172,75 +172,97 @@ class Interpreter(InterpreterBase):
         if not self.env.set(name, value):
             super().error(ErrorType.NAME_ERROR, "variable not defined")
 
-
-
-#MAJOR REFACTOR below
+####
     def __run_fcall(self, statement):
-        fcall_name, args = statement.get("name"), statement.get("args")
+        fcall_name = statement.get("name")
+        args = statement.get("args")
+
+        actual_args = []
+        for arg_expr in args:
+            actual_args.append(self.__eval_expr(arg_expr))
+        arity = len(actual_args)
 
         if fcall_name == "inputi":
-            if len(args) > 1:
+            if arity > 1:
                 super().error(ErrorType.NAME_ERROR, "too many arguments for inputi")
 
-            if args:
-                super().output(str(self.__eval_expr(args[0])))
+            if arity == 1:
+                if isinstance(actual_args[0], bool):
+                    super().output(str(actual_args[0]).lower()) # true or false
+                else: 
+                    super().output(str(actual_args[0]))
 
-            return int(super().get_input())
+            try:
+                return int(super().get_input())
+            except (ValueError, TypeError):
+                super().output(str(actual_args[0]))
+
+        if fcall_name == "inputs":
+            if arity > 1:
+                super().error(ErrorType.NAME_ERROR, "too many arguments for inputs")
+
+            if arity == 1:
+                if isinstance(actual_args[0], bool):
+                    super().output(str(actual_args[0]).lower())
+                else: 
+                    super().output(str(actual_args[0]))
+
+            return super().get_input()
 
         if fcall_name == "print":
             out = ""
-
             for arg in args:
-                out += str(self.__eval_expr(arg))
-
+                if isinstance(arg, bool):
+                    out += str(self.__eval_expr(arg)) # "true" or "false"
+                else:
+                    out += str(arg)
             super().output(out)
 
-            return 0  # undefined behavior
-
-        super().error(ErrorType.NAME_ERROR, "unknown function")
+        return self.__run_function(fcall_name, actual_args)
 
     def __eval_expr(self, expr):
         kind = expr.elem_type
 
         if kind == self.INT_NODE or kind == self.STRING_NODE:
             return expr.get("val")
-
+        elif kind == 'bool':
+            return expr.get("val")
+        elif kind == "nil":
+            return self.NIL_VALUE
+        
+        # handle variable lookup
         elif kind == self.QUALIFIED_NAME_NODE:
             var_name = expr.get("name")
-
             value = self.env.get(var_name)
-            if value is None:
-                super().error(ErrorType.NAME_ERROR, "variable not defined")
-
+            # check if undefined
+            if value is self.NIL_VALUE and not self.env.exists(var_name):
+                super().error(ErrorType.NAME_ERROR, "Variable not defined")
             return value
-
+        
+        # handle function calls
         elif kind == self.FCALL_NODE:
             return self.__run_fcall(expr)
+        
+        #handle unary ops
+        elif kind == 'neg' or kind == '!':
+            operand_value = self.__eval_expr(expr.get("op1"))
+            return self.__eval_unary_op(kind, operand_value)
 
+        #handle binary ops
         elif kind in self.ops:
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
-
-            if isinstance(l, str) or isinstance(r, str):
-                super().error(
-                    ErrorType.TYPE_ERROR, "invalid operand types for arithmetic"
-                )
-
-            if kind == "-":
-                return l - r
-
-            elif kind == "+":
-                return l + r
-        
+            return self.__eval_binary_op(kind, l, r)
+            
     def __eval_unary_op(self, op, op_val):
 
         if op == 'neg':
             if not isinstance(op_val, int):
                 super().error(ErrorType.TYPE_ERROR, "Operand for arithmetic negation must be integer")
-            return not op_val
+            return -op_val
         
         elif op == '!': 
             if not isinstance(op_val, bool):
-                super().error(ErrorType.TYPE_ERROR, "operand dor logical NOT '!' must be boolean")
+                super().error(ErrorType.TYPE_ERROR, "Operand dor logical NOT '!' must be boolean")
             return not op_val
         
         super().error(ErrorType.TYPE_ERROR, f"{op}")
