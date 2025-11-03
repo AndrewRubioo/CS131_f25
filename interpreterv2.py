@@ -38,7 +38,7 @@ class Interpreter(InterpreterBase):
 
         self.funcs = {}  # { (name, arity) : element }
         self.env = Environment()
-        self.ops = {"-", "+", "*", "/"}
+        self.ops = { "-", "+", "*", "/", "==", "!=", "<", ">", "<=", ">=", "&&", "||" }
         self.NIL_VALUE = None
 
     def __get_function(self, name, arity):
@@ -195,11 +195,11 @@ class Interpreter(InterpreterBase):
             try:
                 return int(super().get_input())
             except (ValueError, TypeError):
-                super().output(str(actual_args[0]))
+                super().error(ErrorType.TYPE_ERROR, "Invalid input of inputi, expected an integer")
 
         if fcall_name == "inputs":
             if arity > 1:
-                super().error(ErrorType.NAME_ERROR, "too many arguments for inputs")
+                super().error(ErrorType.NAME_ERROR, "Too many arguments for inputs")
 
             if arity == 1:
                 if isinstance(actual_args[0], bool):
@@ -211,13 +211,16 @@ class Interpreter(InterpreterBase):
 
         if fcall_name == "print":
             out = ""
-            for arg in args:
+            for arg in actual_args:
                 if isinstance(arg, bool):
-                    out += str(self.__eval_expr(arg)) # "true" or "false"
+                    out += str(arg).lower() # "true" or "false"
+                elif arg is self.NIL_VALUE:
+                    out += "nil"
                 else:
                     out += str(arg)
             super().output(out)
-
+            return self.NIL_VALUE
+        
         return self.__run_function(fcall_name, actual_args)
 
     def __eval_expr(self, expr):
@@ -252,6 +255,61 @@ class Interpreter(InterpreterBase):
         elif kind in self.ops:
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
             return self.__eval_binary_op(kind, l, r)
+
+
+    def __eval_binary_op(self, op, l_val, r_val):
+
+        def check_types(type_name, type_class):
+            if not isinstance(l_val, type_class) or not isinstance(r_val, type_class):
+                super().error(ErrorType.TYPE_ERROR, f"Operands for {op} must be two {type_name}s")
+        
+        # Equality
+        if op == "==":
+            return self.__eval_binary_op("==", l_val, r_val)
+        
+        if op == "!=":
+            return not self.__eval_binary_op("==", l_val, r_val) # opposite of ==
+
+        if op == "+" and isinstance(l_val, str):
+            if not isinstance(r_val, str):
+                 super().error(ErrorType.TYPE_ERROR, "Operands for '+' must be two integers or two strings")
+            return l_val + r_val
+
+        # Integer Arithmetic (+, -, *, /)
+        if op in ("+", "-", "*", "/"):
+            check_types("integer", int)
+            if op == "+": 
+                return l_val + r_val
+            if op == "-": 
+                return l_val - r_val
+            if op == "*": 
+                return l_val * r_val
+            if op == "/": # floor division
+                return l_val // r_val
+
+        # Integer Comparison (<, <=, >, >=)
+        if op in ("<", "<=", ">", ">="):
+            # These are illegal for different types[cite: 786].
+            check_types("integer", int) 
+            if op == "<": 
+                return l_val < r_val
+            if op == "<=": 
+                return l_val <= r_val
+            if op == ">": 
+                return l_val > r_val
+            if op == ">=": 
+                return l_val >= r_val
+
+        # Boolean Logical (&&, ||)
+        if op in ("&&", "||"):
+            check_types("boolean", bool)
+            if op == "&&": 
+                return l_val and r_val
+            if op == "||": 
+                return l_val or r_val
+
+        # If we get here, the types were incompatible for the operator
+        super().error(ErrorType.TYPE_ERROR, f"Incompatible types ({type(l_val)}, {type(r_val)}) for operator '{op}'")
             
     def __eval_unary_op(self, op, op_val):
 
@@ -266,6 +324,8 @@ class Interpreter(InterpreterBase):
             return not op_val
         
         super().error(ErrorType.TYPE_ERROR, f"{op}")
+
+    
 
 def main():
     interpreter = Interpreter()
