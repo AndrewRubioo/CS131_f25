@@ -293,7 +293,7 @@ class Interpreter(InterpreterBase):
 
         # integer comparison (<, <=, >, >=)
         if op in ("<", "<=", ">", ">="):
-            # These are illegal for different types[cite: 786].
+            # these are illegal for different types
             check_types("integer", int) 
             if op == "<": 
                 return l_val < r_val
