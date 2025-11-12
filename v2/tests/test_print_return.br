@@ -1,0 +1,14 @@
+def main() {
+  if (print("This should print") == nil) {
+    print("yay!");
+  }
+}
+
+/*
+*IN*
+*IN*
+*OUT*
+This should print
+yay!
+*OUT*
+*/

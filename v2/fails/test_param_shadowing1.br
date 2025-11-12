@@ -1,0 +1,14 @@
+def main() {
+  test_param_shadow(10);
+}
+
+def test_param_shadow(x) {
+  var x;
+  print(x);
+}
+
+/*
+*OUT*
+ErrorType.NAME_ERROR
+*OUT*
+*/ 

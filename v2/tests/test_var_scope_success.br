@@ -1,0 +1,15 @@
+def main() {
+  if (true) {
+    if (true) {
+      var x;
+      x = 10;
+    }
+    print(x);
+  }
+}
+
+/*
+*OUT*
+10
+*OUT*
+*/ 

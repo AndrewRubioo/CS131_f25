@@ -1,0 +1,13 @@
+def main() {
+
+  var x;
+  if (true) {
+    var x;
+  }
+}
+
+/*
+*OUT*
+ErrorType.NAME_ERROR
+*OUT*
+*/

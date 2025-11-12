@@ -1,0 +1,13 @@
+def main() {
+  foo();
+}
+
+def foo() {
+  print("a");
+}
+
+/*
+*OUT*
+a
+*OUT*
+*/

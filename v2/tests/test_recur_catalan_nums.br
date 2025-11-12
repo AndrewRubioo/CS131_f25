@@ -1,0 +1,25 @@
+def main() {
+ print(catalan(4));
+}
+
+def catalan(n) {
+	return catalan_help(n, 0, 0);
+}
+
+def catalan_help(n, ans, j) {
+ if (n < 2) {
+  return 1;
+ } else {
+  while (j < n) {
+   ans = ans + catalan(j) * catalan(n - j - 1);
+   j = j + 1;
+  }
+  return ans;
+ }
+}
+
+/*
+*OUT*
+14
+*OUT*
+*/

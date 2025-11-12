@@ -1,0 +1,22 @@
+
+def main() {
+  var a;
+  a = 5;
+  foo(10);
+  foo(20,30);
+}
+
+def foo(a) {
+  print(a);
+}
+
+def foo(a,b) {
+  print(a," ",b);
+}
+
+/*
+*OUT*
+10
+20 30
+*OUT*
+*/
