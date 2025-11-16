@@ -9,23 +9,42 @@ class Return_Exception(Exception):
 
 class Environment:
     def __init__(self):
-        self.env = {}
+        self.scopes = []
+        self.function_scope = set()
+        self.NIL_VALUE = None
 
+    def push_scope(self):
+        self.scopes.append({})
+    
+    def pop_scope(self):
+        self.scopes.remove({})
+
+    def defined_in_function(self, varname):
+        return varname in self.function_scope
+    
     # define new variable at function scope
-    def fdef(self, var_type, varname):
-        if self.exists(varname):
-            return False
-        self.env[varname] = { 'type': var_type, 'value': None }
+    def fdef(self, var_type, varname, scope_type):
+        if self.is_defined_in_function(varname):
+            return False #no shadowing
+        
+        var_data = {'type': var_type, 'value': self.NIL_VALUE}
+        if scope_type == 'func':
+            self.scopes[0][varname] = var_data
+        elif scope_type == 'block':
+            self.scopes[-1][varname] = var_data
+
+        self.function_scope.add(varname)
+
         return True
 
-    def exists(self, varname):
-        return varname in self.env
-
     def get_var_info(self, varname):
-        if varname in self.env:
-            return self.env[varname]
-        return None
-
+        for scope in reversed(self.scopes):
+            if varname in scope:
+                return scope[varname]
+            
+    def exists(self, varname):
+        return self.get_var_info(varname) is not None
+    
     def get_value(self, varname, value):
         info = self.get_var_info(varname)
         if info:
@@ -33,10 +52,11 @@ class Environment:
         return None
     
     def set_value(self, varname, value):
-        if not self.exists(varname):
-            return False
-        self.env[varname]['value'] = value
-        return True
+        for scope in reversed(self.scopes):
+            if varname in scope:
+                scope[varname]['value'] = value #update value for scope
+                return True
+        return False
 
 class Interpreter(InterpreterBase):
     def __init__(self, console_output=True, inp=None, trace_output=False):
