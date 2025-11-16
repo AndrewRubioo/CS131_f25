@@ -8,7 +8,7 @@ class Return_Exception(Exception):
         self.value = value
 
 class Environment:
-    def __init__(self):
+    def __init__(self, nil_value=None):
         self.scopes = []
         self.function_scope = set()
         self.NIL_VALUE = None
@@ -17,7 +17,8 @@ class Environment:
         self.scopes.append({})
     
     def pop_scope(self):
-        self.scopes.remove({})
+        if len(self.scopes) > 1:
+            self.scopes.pop()
 
     def defined_in_function(self, varname):
         return varname in self.function_scope
@@ -56,27 +57,24 @@ class Environment:
             if varname in scope:
                 scope[varname]['value'] = value #update value for scope
                 return True
-        return False
+        return False # variable not found - defined
 
 class Interpreter(InterpreterBase):
+        
+    VAR_DEF_NODE = "vardef" #intbase
+    BVAR_DEF_NODE = "bvardef"
+    FUNCTION_SCOPE = 'func'
+    BLOCK_SCOPE = 'block'
+
     def __init__(self, console_output=True, inp=None, trace_output=False):
         super().__init__(console_output, inp)
 
-        self.funcs = {}  # { (name, arity) : element }
-        self.env = Environment()
-        self.ops = { "-", "+", "*", "/", "==", "!=", "<", ">", "<=", ">=", "&&", "||" }
         self.NIL_VALUE = None
+        self.funcs = {}  # { (name, arity) : element }
+        self.env = Environment(self.NIL_VALUE)
+        self.ops = { "-", "+", "*", "/", "==", "!=", "<", ">", "<=", ">=", "&&", "||" }
 
         self.type_suffixes = { 'i': 'int', 's' : 'string', 'b': 'bool', 'o' : 'object', 'v' : 'void' }
-
-    # new type helpermethods to grab suffix, var_type from name, return type, 
-
-    # def get_function(self, name, arity):
-    #     func_key = (name, arity)
-    #     if func_key in self.funcs:
-    #         return self.funcs[func_key]
-        
-    #     super().error(ErrorType.NAME_ERROR, f"Function {name} with {arity} arguments not found")
 
     def get_var_type_from_name(self, name):
         # must be 2 chars since 1 is type suffix
@@ -184,27 +182,31 @@ class Interpreter(InterpreterBase):
             pass
     
     def __run_function(self, name, actual_args):
-        # function to create new scope for every function call
+        # function scope is pushed
+        self.env.push_scope()
+
         actual_arg_types = []
         for arg in actual_args:
             arg_type = self.get_runtime_type(arg)
             actual_arg_types.append(arg_type)
-
+        
         # passing in tuple of types now
         func_ast = self.get_function(name, actual_arg_types)
-
         return_type = self.get_return_type_from_name(name)
 
-        caller_env = self.env
-        self.env = Environment()
-        formal_args = func_ast.get("args") #initialize args - pass by value
+        caller_env = self.env # save environment for function return
+        self.env = Environment(self.NIL_VALUE)
+        self.env.push_scope()
 
+        formal_args = func_ast.get("args") #initialize args - pass by value
         for i, formal_arg in enumerate(formal_args):
             var_name = formal_arg.get("name")
             var_type = self.get_var_type_from_name(var_name)
             # fdef now stores var type and name
-            self.env.fdef(var_type, var_name)
-            self.env.set(var_name, actual_args[i])
+            if not self.envfdef(var_type, var_name, self.FUNCTION_SCOPE):
+                super().error(ErrorType.NAME_ERROR(f"Paramter {var_name} already defined"))
+
+            self.env.set_value(var_name, actual_args[i])
 
         return_value = self.get_default_value(return_type)
 
@@ -222,7 +224,7 @@ class Interpreter(InterpreterBase):
                     super().error(ErrorType.TYPE_ERROR, f"Void function '{name}' cannot return a value")
             elif returned_type != return_type:
                 # value returned doesn't match the function's declared type
-                super().error(ErrorType.TYPE_ERROR, f"Function '{name}' returns type {returned_type}, expected {returned_type}")
+                super().error(ErrorType.TYPE_ERROR, f"Function '{name}' returns type {returned_type}, expected {return_type}")
 
             return_value = returned_value
 
@@ -235,6 +237,9 @@ class Interpreter(InterpreterBase):
 
         if kind == self.VAR_DEF_NODE:
             self.__run_vardef(statement)
+
+        elif kind == self.BVAR_DEF_NODE:
+            self.__run_bvardef(statement)
 
         elif kind == "=":
             self.__run_assign(statement)
@@ -305,8 +310,18 @@ class Interpreter(InterpreterBase):
         if var_type is None:
             super().error(ErrorType.TYPE_ERROR, f"Variable name '{name}' must end with a valid type suffix (i, s, b, o)")
 
-        if not self.env.fdef(var_type, name):
-            super().error(ErrorType.NAME_ERROR, "variable already defined")
+        if not self.env.fdef(var_type, name, self.FUNCTION_SCOPE):
+            super().error(ErrorType.NAME_ERROR, f"Variable '{name}' already defined")
+
+    def __run_bvardef(self, statement):
+        name = statement.get("name")
+        var_type = self.get_var_type_from_name(name)
+
+        if var_type is None:
+            super().error(ErrorType.TYPE_ERROR, f"Block variable name '{name}' must end with type suffix")
+        
+        if not self.env.fdef(var_type, name, self.BLOCK_SCOPE):
+            super().error(ErrorType.TYPE_ERROR, f"Variable '{name}' already defined")
 
     def __run_assign(self, statement):
         name = statement.get("var")
