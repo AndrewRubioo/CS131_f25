@@ -25,7 +25,7 @@ class Environment:
     
     # define new variable at function scope
     def fdef(self, var_type, varname, scope_type):
-        if self.is_defined_in_function(varname):
+        if self.defined_in_function(varname):
             return False #no shadowing
         
         var_data = {'type': var_type, 'value': self.NIL_VALUE}
@@ -203,7 +203,7 @@ class Interpreter(InterpreterBase):
             var_name = formal_arg.get("name")
             var_type = self.get_var_type_from_name(var_name)
             # fdef now stores var type and name
-            if not self.envfdef(var_type, var_name, self.FUNCTION_SCOPE):
+            if not self.env.fdef(var_type, var_name, self.FUNCTION_SCOPE):
                 super().error(ErrorType.NAME_ERROR(f"Paramter {var_name} already defined"))
 
             self.env.set_value(var_name, actual_args[i])
@@ -276,15 +276,23 @@ class Interpreter(InterpreterBase):
             super().error(ErrorType.TYPE_ERROR, "Statement conditiion must be a boolean")
 
         if condition_value:
-            true_statements = statement.get("statements")
-            for stmt in true_statements:
-                self.__execute_statement(stmt)
+            self.env.push_scope()
+            try:
+                true_statements = statement.get("statements")
+                for stmt in true_statements:
+                    self.__execute_statement(stmt)
+            finally: # pop once block finishes
+                self.env.pop_scope()
         else:
             else_statements = statement.get("else_statements")
             if else_statements:
-                for stmt in else_statements:
-                    self.__execute_statement(stmt)
-    
+                self.env.push_scope()
+                try:
+                    for stmt in else_statements:
+                        self.__execute_statement(stmt)
+                finally:
+                    self.env.pop_scope()
+
     def __run_while(self, statement):
         # similar to checking if - check each statement while true
         condition_expr = statement.get("condition")
@@ -299,8 +307,12 @@ class Interpreter(InterpreterBase):
             if not condition_value:
                 break
             
-            for stmt in loop_statements:
-                self.__execute_statement(stmt)
+            self.env.push_scope()
+            try:
+                for stmt in loop_statements:
+                    self.__execute_statement(stmt)
+            finally:
+                self.env.pop_scope()
         
     def __run_vardef(self, statement):
         # if statement evaluates boolean
@@ -321,7 +333,7 @@ class Interpreter(InterpreterBase):
             super().error(ErrorType.TYPE_ERROR, f"Block variable name '{name}' must end with type suffix")
         
         if not self.env.fdef(var_type, name, self.BLOCK_SCOPE):
-            super().error(ErrorType.TYPE_ERROR, f"Variable '{name}' already defined")
+            super().error(ErrorType.NAME_ERROR, f"Variable '{name}' already defined")
 
     def __run_assign(self, statement):
         name = statement.get("var")
@@ -499,6 +511,9 @@ class Interpreter(InterpreterBase):
         
         super().error(ErrorType.TYPE_ERROR, f"{op}")
 
+    class BrewinObject:
+        def __init__(self):
+            self.fields = {}
 
 def main():
     interpreter = Interpreter()
