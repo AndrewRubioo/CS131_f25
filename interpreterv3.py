@@ -12,24 +12,30 @@ class Environment:
         self.env = {}
 
     # define new variable at function scope
-    def fdef(self, varname):
+    def fdef(self, var_type, varname):
         if self.exists(varname):
             return False
-        self.env[varname] = None
+        self.env[varname] = { 'type': var_type, 'value': None }
         return True
 
     def exists(self, varname):
         return varname in self.env
 
-    def get(self, varname):
+    def get_var_info(self, varname):
         if varname in self.env:
             return self.env[varname]
         return None
 
-    def set(self, varname, value):
+    def get_value(self, varname, value):
+        info = self.get_var_info(varname)
+        if info:
+            return info['value']
+        return None
+    
+    def set_value(self, varname, value):
         if not self.exists(varname):
             return False
-        self.env[varname] = value
+        self.env[varname]['value'] = value
         return True
 
 class Interpreter(InterpreterBase):
@@ -41,33 +47,133 @@ class Interpreter(InterpreterBase):
         self.ops = { "-", "+", "*", "/", "==", "!=", "<", ">", "<=", ">=", "&&", "||" }
         self.NIL_VALUE = None
 
-    def __get_function(self, name, arity):
-        func_key = (name, arity)
+        self.type_suffixes = { 'i': 'int', 's' : 'string', 'b': 'bool', 'o' : 'object', 'v' : 'void' }
+
+    # new type helpermethods to grab suffix, var_type from name, return type, 
+
+    # def get_function(self, name, arity):
+    #     func_key = (name, arity)
+    #     if func_key in self.funcs:
+    #         return self.funcs[func_key]
+        
+    #     super().error(ErrorType.NAME_ERROR, f"Function {name} with {arity} arguments not found")
+
+    def get_var_type_from_name(self, name):
+        # must be 2 chars since 1 is type suffix
+        if type(name) != str or len(name) < 2:
+            return None
+        
+        suffix = name[-1]
+        if suffix == 'v': #void function return
+            return None
+
+        if suffix in self.type_suffixes:
+            return self.type_suffixes[suffix]
+        
+        return None # invalid suffix
+    
+    def get_return_type_from_name(self, name):
+        if name == 'main':
+            return 'void'
+        
+        if type(name) != str or len(name) < 2:
+            return None
+        
+        suffix = name[-1]
+        return self.type_suffixes.get(suffix)
+
+    def get_default_value(self, typename):
+        if typename == 'int': return 0
+        if typename == 'string' : return ""
+        if typename == 'bool' : return False
+        if typename == 'object' or typename == 'void' : return self.NIL_VALUE
+ 
+        return self.NIL_VALUE
+    
+    # Lookup and Validation
+    
+    def get_parameter_type_signature(self, formal_args):
+        param_types = []
+
+        for arg in formal_args: # list of AST
+            arg_name = arg.get("name")
+            var_type = self.get_var_type_from_name(arg_name)
+
+            if var_type is None:
+                super().error(ErrorType.TYPE_ERROR, f"Formal parameter '{arg_name}' has invalid or 'v' type suffix")
+            param_types.append(var_type)
+
+        return param_types
+    
+    def get_runtime_type(self, value):
+        if type(value) is int:
+            return 'int'
+        if type(value) is str:
+            return 'string'
+        if type(value) is bool:
+            return 'bool'
+        if value is self.NIL_VALUE:
+            return 'object'
+        
+        return 'object'
+        
+    # update get function, no more arity
+    def get_function(self, name, arg_types):
+        func_key = (name, tuple(arg_types))
+
         if func_key in self.funcs:
             return self.funcs[func_key]
         
-        super().error(ErrorType.NAME_ERROR, f"Function {name} with {arity} arguments not found")
+        super().error(ErrorType.NAME_ERROR, f"Function {name} not found")
+
+    def validate_function_signature(self, name, fomral_args):
+        return_type = self.get_return_type_from_name(name)
+
+        if return_type is None:
+            super().error(ErrorType.TYPE_ERROR, f"Function name '{name}' must end with valid return type suffic")
+
+        for arg in fomral_args:
+            arg_name = arg.get("name")
+            if self.get_var_type_from_name(arg_name) is None:
+                super().error(ErrorType.TYPE_ERROR, f"Formal parameter '{arg_name}' must end with valid return type suffic")
 
     def run(self, program):
         ast = parse_program(program, generate_image)
+        self.funcs = {}
 
         for func in ast.get("functions"):
             name = func.get("name")
-            arity = len(func.get("args"))
+            formal_args = func.get("args")
 
-            if (name, arity) in self.funcs:
-                pass #undefined behavoir for functions with same name/arity
+            self.validate_function_signature(name, formal_args)
 
-            self.funcs[(name, arity)] = func
+            param_types = self.get_parameter_type_signature(formal_args)
+            func_key = (name, tuple(param_types))
 
+            if func_key in self.funcs:
+                # check if signature duplicate
+                super.error(ErrorType.NAME_ERROR, f"Duplicate function definition fir {name} with type signature {param_types}")
+            self.funcs[func_key] = func
+
+        if ("main", ()) not in self.funcs:
+            super.error(ErrorType.NAME_ERROR, "main function not found (needed)")
+                            
         try:
             self.__run_function("main", []) # using new method to run multiple function scopes + new functions
         except Return_Exception:
             pass
-
+    
     def __run_function(self, name, actual_args):
         # function to create new scope for every function call
-        func_ast = self.__get_function(name, len(actual_args))
+        actual_arg_types = []
+        for arg in actual_args:
+            arg_type = self.get_runtime_type(arg)
+            actual_arg_types.append(arg_type)
+
+        # passing in tuple of types now
+        func_ast = self.get_function(name, actual_arg_types)
+
+        return_type = self.get_return_type_from_name(name)
 
         caller_env = self.env
         self.env = Environment()
@@ -75,17 +181,30 @@ class Interpreter(InterpreterBase):
 
         for i, formal_arg in enumerate(formal_args):
             var_name = formal_arg.get("name")
-            self.env.fdef(var_name)
+            var_type = self.get_var_type_from_name(var_name)
+            # fdef now stores var type and name
+            self.env.fdef(var_type, var_name)
             self.env.set(var_name, actual_args[i])
 
-        return_value = self.NIL_VALUE #default
+        return_value = self.get_default_value(return_type)
 
         try:
             for statement in func_ast.get("statements"):
                 self.__execute_statement(statement)
         
         except Return_Exception as e:
-            return_value = e.value
+            returned_value = e.value
+            returned_type = self.get_runtime_type(returned_value)
+
+            if return_type == 'void':
+                if returned_value is not self.NIL_VALUE:
+                    #void function or main cannot return value
+                    super().error(ErrorType.TYPE_ERROR, f"Void function '{name}' cannot return a value")
+            elif returned_type != return_type:
+                # value returned doesn't match the function's declared type
+                super().error(ErrorType.TYPE_ERROR, f"Function '{name}' returns type {returned_type}, expected {returned_type}")
+
+            return_value = returned_value
 
         self.env = caller_env # restore caller scope
 
@@ -161,17 +280,33 @@ class Interpreter(InterpreterBase):
     def __run_vardef(self, statement):
         # if statement evaluates boolean
         name = statement.get("name")
+        var_type = statement.get_var_type_from_name(name)
 
-        if not self.env.fdef(name):
+        if var_type is None:
+            super().error(ErrorType.TYPE_ERROR, f"Variable name '{name}' must end with a valid type suffix (i, s, b, o)")
+
+        if not self.env.fdef(var_type, name):
             super().error(ErrorType.NAME_ERROR, "variable already defined")
 
     def __run_assign(self, statement):
         name = statement.get("var")
-
         value = self.__eval_expr(statement.get("expression"))
-        if not self.env.set(name, value):
+        runtime_type = self.get_runtime_type(value)
+        
+        var_info = self.env.get_var_info(name)
+        if var_info is None:
             super().error(ErrorType.NAME_ERROR, "variable not defined")
 
+        declared_type = var_info['type']
+
+        # type mismatch from decalred to assignment
+        if declared_type != runtime_type:
+            super().error(ErrorType.TYPE_ERROR, f"Cannnot assign value of type {runtime_type} to variable {name} of declared type {declared_type}")
+
+        #assignment
+        if not self.env.set_value(name, value): # if var_info successful, should not reach here
+            super().error(ErrorType.NAME_ERROR, f'Variable {name} not defined')
+    
 ####
     def __run_fcall(self, statement):
         fcall_name = statement.get("name")
