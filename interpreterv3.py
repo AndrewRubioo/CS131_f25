@@ -11,7 +11,7 @@ class Environment:
     def __init__(self, nil_value=None):
         self.scopes = []
         self.function_scope = set()
-        self.NIL_VALUE = None
+        self.NIL_VALUE = nil_value
 
     def push_scope(self):
         self.scopes.append({})
@@ -131,6 +131,8 @@ class Interpreter(InterpreterBase):
         if type(value) is bool:
             return 'bool'
         if value is self.NIL_VALUE:
+            return 'object'
+        if type(value) is BrewinObject:
             return 'object'
         
         return 'object'
@@ -255,6 +257,12 @@ class Interpreter(InterpreterBase):
 
         elif kind == self.WHILE_NODE:
             self.__run_while(statement)
+        
+        elif kind == 'nil':
+            return self.NIL_VALUE
+        
+        elif kind == '@':
+            return BrewinObject() # create - return new instsance
 
 
     def __run_return(self, statement):
@@ -418,10 +426,7 @@ class Interpreter(InterpreterBase):
         # handle variable lookup
         elif kind == self.QUALIFIED_NAME_NODE:
             var_name = expr.get("name")
-            value = self.env.get(var_name)
-            # check if undefined
-            if value is self.NIL_VALUE and not self.env.exists(var_name):
-                super().error(ErrorType.NAME_ERROR, "Variable not defined")
+            value = self.__resolve_dotted_name(var_name)
             return value
         
         # handle function calls
@@ -438,7 +443,37 @@ class Interpreter(InterpreterBase):
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
             return self.__eval_binary_op(kind, l, r)
 
+    def __resolve_dotted_name(self, dotted_name):
+        path = dotted_name.split('.')
+        base_name = path[0]
 
+        base_info = self.env.get_value(base_name)
+        if base_info is None:
+            super().error(ErrorType.NAME_ERROR, f"Variable '{base_name}' not defined")
+
+        current_obj = self.env.get_value(base_name)
+
+        if base_info['type'] != 'object':
+            super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' not an object")
+
+        for i in range(1, len(path)):
+            segment = path[i]
+
+            if current_obj is self.NIL_VALUE: # previous segment non-nil
+                super().error(ErrorType.FAULT_ERROR, f"Cannot derefernece nil object '{base_name}'")
+
+            if i < len(path) - 1: # not last segment so must be object
+                if self.get_var_type_from_name(segment) != 'object':
+                    super().error(ErrorType.TYPE_ERROR, f"Intermediate field '{segment}' must be object typed")
+
+            # does field exist - segment missing is a name error
+            if segment not in current_obj.fields:
+                super().error(ErrorType.NAME_ERROR, f"Field '{segment} not found in object")
+
+            current_obj = current_obj.fields[segment]
+
+        return current_obj
+    
     def __eval_binary_op(self, op, l_val, r_val):
 
         def check_types(type_name, type_class):
@@ -511,9 +546,22 @@ class Interpreter(InterpreterBase):
         
         super().error(ErrorType.TYPE_ERROR, f"{op}")
 
-    class BrewinObject:
-        def __init__(self):
-            self.fields = {}
+class BrewinObject:
+    def __init__(self):
+        self.fields = {}
+
+class BrewinReference:
+    def __init__(self, env, varname, parent_obj=None, field_name=None):
+        self.env = env
+        self.varname = varname
+        self.parent_obj = parent_obj
+        self.field_name = field_name
+
+    def get_value(self):
+        pass
+
+    def set_value(self, value):
+        pass
 
 def main():
     interpreter = Interpreter()
