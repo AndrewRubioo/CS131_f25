@@ -24,11 +24,11 @@ class Environment:
         return varname in self.function_scope
     
     # define new variable at function scope
-    def fdef(self, var_type, varname, scope_type):
+    def fdef(self, var_type, varname, scope_type, default_value):
         if self.defined_in_function(varname):
             return False #no shadowing
         
-        var_data = {'type': var_type, 'value': self.NIL_VALUE}
+        var_data = {'type': var_type, 'value': default_value}
         if scope_type == 'func':
             self.scopes[0][varname] = var_data
         elif scope_type == 'block':
@@ -42,6 +42,7 @@ class Environment:
         for scope in reversed(self.scopes):
             if varname in scope:
                 return scope[varname]
+        return None
             
     def exists(self, varname):
         return self.get_var_info(varname) is not None
@@ -70,6 +71,7 @@ class Interpreter(InterpreterBase):
         super().__init__(console_output, inp)
 
         self.NIL_VALUE = None
+        self.VOID_VALUE = object()
         self.funcs = {}  # { (name, arity) : element }
         self.env = Environment(self.NIL_VALUE)
         self.ops = { "-", "+", "*", "/", "==", "!=", "<", ">", "<=", ">=", "&&", "||" }
@@ -78,23 +80,20 @@ class Interpreter(InterpreterBase):
 
     def get_var_type_from_name(self, name):
         # must be 2 chars since 1 is type suffix
-        if type(name) != str or len(name) < 2:
+        if type(name) != str or len(name) < 1:
             return None
         
         suffix = name[-1]
         if suffix == 'v': #void function return
             return None
 
-        if suffix in self.type_suffixes:
-            return self.type_suffixes[suffix]
-        
-        return None # invalid suffix
+        return self.type_suffixes.get(suffix)
     
     def get_return_type_from_name(self, name):
         if name == 'main':
             return 'void'
         
-        if type(name) != str or len(name) < 2:
+        if type(name) != str or len(name) < 1:
             return None
         
         suffix = name[-1]
@@ -104,7 +103,8 @@ class Interpreter(InterpreterBase):
         if typename == 'int': return 0
         if typename == 'string' : return ""
         if typename == 'bool' : return False
-        if typename == 'object' or typename == 'void' : return self.NIL_VALUE
+        if typename == 'object' : return self.NIL_VALUE
+        if typename == 'void' : return self.VOID_VALUE
  
         return self.NIL_VALUE
     
@@ -132,8 +132,12 @@ class Interpreter(InterpreterBase):
             return 'bool'
         if value is self.NIL_VALUE:
             return 'object'
-        if type(value) is BrewinObject:
+        if value is self.VOID_VALUE:
+            return 'void'
+        if isinstance(value, BrewinObject):
             return 'object'
+        if isinstance(value, BrewinReference):
+            return self.get_runtime_type(value.get_value())
         
         return 'object'
         
@@ -146,8 +150,8 @@ class Interpreter(InterpreterBase):
         
         super().error(ErrorType.NAME_ERROR, f"Function {name} not found")
 
-    def get_locator(self, expr):
-        if expr.elem_types != self.QUALIFIED_NAME_NODE:
+    def get_locator(self, expr, env):
+        if expr.elem_type != self.QUALIFIED_NAME_NODE:
             super().error(ErrorType.TYPE_ERROR, "Reference argument must be a variable or field")
 
         dotted_name = expr.get("name")
@@ -155,29 +159,30 @@ class Interpreter(InterpreterBase):
         base_name = path[0]
 
         if len(path) == 1:
-            if not self.env.exists(base_name):
+            if not env.exists(base_name):
                 super().error(ErrorType.NAME_ERROR, f"Variable '{base_name}' not defined")
-            return BrewinReference(self.env, base_name)
+            return BrewinReference(env, base_name)
         
         # resolve parent object
-        current_obj = self.env.get_value(base_name)
-        base_info = self.env.get_var_info(base_name)
+        base_info = env.get_var_info(base_name)
 
         if base_info is None or base_info['type'] != 'object':
             super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' is not object")
+
+        current_obj = env.get_value(base_name)
 
         for i in range(1, len(path) - 1):
             segment = path[i]
             if current_obj is self.NIL_VALUE:
                 super().error(ErrorType.FAULT_ERROR, f"Cannot dereference through nil object at '{path[i-1]}' ")
-            
-            if segment not in current_obj.fields:
-                super().error(ErrorType.NAME_ERROR, f"Intermediate object field '{segment}' not found.")
-                        
+
             # intermediate must be object
             if self.get_var_type_from_name(segment) != 'object':
                 super().error(ErrorType.TYPE_ERROR, f"Intermediate field '{segment}' must be object typed ")
 
+            if segment not in current_obj.fields:
+                super().error(ErrorType.NAME_ERROR, f"Intermediate object field '{segment}' not found.")
+                        
             current_obj = current_obj.fields[segment]
         
         if current_obj is self.NIL_VALUE:
@@ -213,11 +218,11 @@ class Interpreter(InterpreterBase):
 
             if func_key in self.funcs:
                 # check if signature duplicate
-                super.error(ErrorType.NAME_ERROR, f"Duplicate function definition fir {name} with type signature {param_types}")
+                super().error(ErrorType.NAME_ERROR, f"Duplicate function definition fir {name} with type signature {param_types}")
             self.funcs[func_key] = func
 
         if ("main", ()) not in self.funcs:
-            super.error(ErrorType.NAME_ERROR, "main function not found (needed)")
+            super().error(ErrorType.NAME_ERROR, "main function not found (needed)")
                             
         try:
             self.__run_function("main", []) # using new method to run multiple function scopes + new functions
@@ -248,16 +253,16 @@ class Interpreter(InterpreterBase):
             is_ref = formal_arg.get("ref")
             var_type = self.get_var_type_from_name(var_name)
             # fdef now stores var type and name
-            if not self.env.fdef(var_type, var_name, self.FUNCTION_SCOPE):
+            if not self.env.fdef(var_type, var_name, self.FUNCTION_SCOPE, self.get_default_value(var_type)):
                 super().error(ErrorType.NAME_ERROR, f"Paramter {var_name} already defined")
 
             if is_ref:
-                locator = self.get_locator(arg_expressions[i])
+                locator = self.get_locator(arg_expressions[i], caller_env)
                 ref_value = locator.get_value()
                 ref_type = self.get_runtime_type(ref_value)
 
                 if ref_type != var_type:
-                    super().error(ErrorType.TYPE_ERROR, f"Cannot pass reference of type {ref_type} to param '{var_name}' (expect a {ref_type})" )
+                    super().error(ErrorType.TYPE_ERROR, f"Cannot pass reference of type {ref_type} to param '{var_name}'" )
 
                 self.env.set_value(var_name, locator)
 
@@ -311,18 +316,11 @@ class Interpreter(InterpreterBase):
 
         elif kind == self.WHILE_NODE:
             self.__run_while(statement)
-        
-        elif kind == 'nil':
-            return self.NIL_VALUE
-        
-        elif kind == '@':
-            return BrewinObject() # create - return new instsance
-
 
     def __run_return(self, statement):
 
         expression = statement.get("expression")
-        return_value = self.NIL_VALUE
+        return_value = self.VOID_VALUE
 
         if expression:
             return_value = self.__eval_expr(expression)
@@ -379,12 +377,12 @@ class Interpreter(InterpreterBase):
     def __run_vardef(self, statement):
         # if statement evaluates boolean
         name = statement.get("name")
-        var_type = statement.get_var_type_from_name(name)
+        var_type = self.get_var_type_from_name(name)
 
         if var_type is None:
             super().error(ErrorType.TYPE_ERROR, f"Variable name '{name}' must end with a valid type suffix (i, s, b, o)")
 
-        if not self.env.fdef(var_type, name, self.FUNCTION_SCOPE):
+        if not self.env.fdef(var_type, name, self.FUNCTION_SCOPE, self.get_default_value(var_type)):
             super().error(ErrorType.NAME_ERROR, f"Variable '{name}' already defined")
 
     def __run_bvardef(self, statement):
@@ -394,87 +392,137 @@ class Interpreter(InterpreterBase):
         if var_type is None:
             super().error(ErrorType.TYPE_ERROR, f"Block variable name '{name}' must end with type suffix")
         
-        if not self.env.fdef(var_type, name, self.BLOCK_SCOPE):
+        if not self.env.fdef(var_type, name, self.BLOCK_SCOPE, self.get_default_value(var_type)):
             super().error(ErrorType.NAME_ERROR, f"Variable '{name}' already defined")
 
     def __run_assign(self, statement):
         name = statement.get("var")
         value = self.__eval_expr(statement.get("expression"))
         runtime_type = self.get_runtime_type(value)
-        
-        var_info = self.env.get_var_info(name)
-        if var_info is None:
-            super().error(ErrorType.NAME_ERROR, "variable not defined")
 
-        declared_type = var_info['type']
+        if '.' not in name:
+            var_info = self.env.get_var_info(name)
+            if var_info is None:
+                super().error(ErrorType.NAME_ERROR, f"Variable '{name}' not defined")
 
-        # type mismatch from decalred to assignment
-        if declared_type != runtime_type:
-            super().error(ErrorType.TYPE_ERROR, f"Cannnot assign value of type {runtime_type} to variable {name} of declared type {declared_type}")
+            declared_type = var_info['type']
+            target_value = var_info['value']
+            
+            # type check
+            if declared_type != runtime_type:
+                super().error(ErrorType.TYPE_ERROR, f"Cannot assign value of type {runtime_type} to variable '{name}' of declared type {declared_type}")
 
-        #assignment
-        if not self.env.set_value(name, value): # if var_info successful, should not reach here
-            super().error(ErrorType.NAME_ERROR, f'Variable {name} not defined')
-    
-####
+            # assignment - check if target is a reference
+            if isinstance(target_value, BrewinReference):
+                target_value.set_value(value)
+            else:
+                self.env.set_value(name, value)
+                
+        else:  # dotted field assignment
+            path = name.split('.')
+            base_name = path[0]
+            final_field_name = path[-1]
+
+            #check base variable exists
+            base_info = self.env.get_var_info(base_name)
+            if base_info is None:
+                super().error(ErrorType.NAME_ERROR, f"Variable '{base_name}' not defined")
+            
+            current_obj = self.env.get_value(base_name)
+
+            if isinstance(current_obj, BrewinReference):
+                current_obj = current_obj.get_value()
+
+            if current_obj is self.NIL_VALUE:
+                super().error(ErrorType.FAULT_ERROR, f"Cannot dereference nil object '{base_name}'")
+
+            if not isinstance(current_obj, BrewinObject):
+                super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' is not an object")
+
+            for i in range(1, len(path) - 1):
+                segment = path[i]
+
+                if segment not in current_obj.fields:
+                    super().error(ErrorType.NAME_ERROR, f"Intermediate field '{segment}' not found.")
+
+                # segment must be object-typed
+                if current_obj is self.NIL_VALUE: 
+                    super().error(ErrorType.FAULT_ERROR, f"Cannot dereference through nil object at intermediate field '{path[i-1]}'")
+
+                if self.get_var_type_from_name(segment) != 'object':
+                    super().error(ErrorType.TYPE_ERROR, f"Intermediate field '{segment}' must be object-typed")
+
+                # current_obj must be a real object
+                if not isinstance(current_obj, BrewinObject):
+                    super().error(ErrorType.FAULT_ERROR, f"Cannot dereference nil object '{path[i-1]}'")
+
+                current_obj = current_obj.fields[segment]
+
+            parent_obj = current_obj
+
+            if not isinstance(parent_obj, BrewinObject):
+                super().error(ErrorType.FAULT_ERROR, f"Cannot assign field '{final_field_name}' to nil object")
+
+            # final type check
+            declared_field_type = self.get_var_type_from_name(final_field_name)
+
+            if declared_field_type is None:
+                super().error(ErrorType.TYPE_ERROR, f"Field name '{final_field_name}' must end with a valid type suffix (i, s, b, o)")
+
+            if declared_field_type != runtime_type:
+                super().error(ErrorType.TYPE_ERROR, f"Cannot assign value of type {runtime_type} to field '{final_field_name}' of declared type {declared_field_type}")
+
+            parent_obj.fields[final_field_name] = value
+
     def __run_fcall(self, statement):
         fcall_name = statement.get("name")
         arg_expressions = statement.get("args")
 
+        # handle built-ins
         if fcall_name in ["inputi", "inputs", "print"]:
             actual_args = [self.__eval_expr(expr) for expr in arg_expressions]
             arity = len(actual_args)
 
         ################
-        if fcall_name == "inputi":
-            if arity > 1:
-                super().error(ErrorType.NAME_ERROR, "too many arguments for inputi")
+            if fcall_name == "inputi":
+                if arity > 1:
+                    super().error(ErrorType.NAME_ERROR, "too many arguments for inputi")
 
-            if arity == 1:
-                if isinstance(actual_args[0], bool):
-                    super().output(str(actual_args[0]).lower()) # true or false
-                else: 
-                    super().output(str(actual_args[0]))
-            try:
-                return int(super().get_input())
-        
-            except (ValueError, TypeError):
-                super().error(ErrorType.TYPE_ERROR, "Invalid input of inputi, expected an integer")
+                if arity == 1:
+                    if isinstance(actual_args[0], bool):
+                        super().output(str(actual_args[0]).lower()) # true or false
+                    else: 
+                        super().output(str(actual_args[0]))
+                try:
+                    return int(super().get_input())
+                except (ValueError, TypeError):
+                    super().error(ErrorType.TYPE_ERROR, "Invalid input of inputi, expected an integer")
 
-        elif fcall_name == "inputs":
-            if arity > 1:
-                super().error(ErrorType.NAME_ERROR, "Too many arguments for inputs")
+            elif fcall_name == "inputs":
+                if arity > 1:
+                    super().error(ErrorType.NAME_ERROR, "Too many arguments for inputs")
 
-            if arity == 1:
-                if isinstance(actual_args[0], bool):
-                    super().output(str(actual_args[0]).lower())
-                else: 
-                    super().output(str(actual_args[0]))
+                if arity == 1:
+                    if isinstance(actual_args[0], bool):
+                        super().output(str(actual_args[0]).lower())
+                    else: 
+                        super().output(str(actual_args[0]))
 
-            return super().get_input()
+                return super().get_input()
 
-        if fcall_name == "print":
-            out = ""
-            for arg in actual_args:
-                if isinstance(arg, bool):
-                    out += str(arg).lower() # "true" or "false"
-                elif arg is self.NIL_VALUE:
-                    out += "nil"
-                else:
-                    out += str(arg)
-            super().output(out)
-            return self.NIL_VALUE
-        ########
-        actual_args = []
-        for arg_expr in arg_expressions:
-            actual_args.append(self.__eval_expr(arg_expr))
-        arity = len(actual_args)
-        
-        if fcall_name in ["print", "inputi", "inputs"]:
-            for expr in arg_expressions:
-                actual_values = [self.__eval_expr(expr)]
+            elif fcall_name == "print":
+                out = ""
+                for arg in actual_args:
+                    if isinstance(arg, bool):
+                        out += str(arg).lower()
+                    elif arg is self.NIL_VALUE:
+                        out += "nil"
+                    else:
+                        out += str(arg)
+                super().output(out)
+                return self.NIL_VALUE
 
-        return self.__run_function(fcall_name, actual_args)
+        return self.__run_function(fcall_name, arg_expressions)
     
     def __run_convert(self, to_type, expr):
 
@@ -512,7 +560,7 @@ class Interpreter(InterpreterBase):
             if from_type == 'int':
                 return value != 0 # int -> false iff 0
             if from_type == 'string':
-                return len(value) > 0 # string -> false iff empty string ""
+                return len(value) > 0 # string -> false iff empty string
         
         super().error(ErrorType.TYPE_ERROR, f"Invalid conversion from {from_type} to {to_type}.")
 
@@ -529,6 +577,9 @@ class Interpreter(InterpreterBase):
         elif kind == self.QUALIFIED_NAME_NODE:
             var_name = expr.get("name")
             value = self.__resolve_dotted_name(var_name)
+
+            if isinstance(value, BrewinReference):
+                value = value.get_value()
             return value
         
         # handle function calls
@@ -544,8 +595,12 @@ class Interpreter(InterpreterBase):
         elif kind in self.ops:
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
             return self.__eval_binary_op(kind, l, r)
+        
         elif kind == 'convert':
             return self.__run_convert(expr.get('to_type'), expr.get('expr'))
+        
+        elif kind == "@":
+            return BrewinObject()
 
     def __resolve_dotted_name(self, dotted_name):
         path = dotted_name.split('.')
@@ -557,21 +612,31 @@ class Interpreter(InterpreterBase):
 
         current_obj = self.env.get_value(base_name)
 
-        if base_info['type'] != 'object':
-            super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' not an object")
+        if len(path) == 1:
+            return current_obj
+        
+        # if the base is a reference, get the object it points to
+        if isinstance(current_obj, BrewinReference):
+            current_obj = current_obj.get_value()
+
+        if current_obj is self.NIL_VALUE:
+            super().error(ErrorType.FAULT_ERROR, f"Cannot dereference nil object '{base_name}'")
+
+        if not isinstance(current_obj, BrewinObject):
+             super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' is not an object.")
 
         for i in range(1, len(path)):
             segment = path[i]
 
             if current_obj is self.NIL_VALUE: # previous segment non-nil
-                super().error(ErrorType.FAULT_ERROR, f"Cannot derefernece nil object '{base_name}'")
+                super().error(ErrorType.FAULT_ERROR, f"Cannot derefernece nil object '{path[i-1]}'")
 
             if i < len(path) - 1: # not last segment so must be object
                 if self.get_var_type_from_name(segment) != 'object':
                     super().error(ErrorType.TYPE_ERROR, f"Intermediate field '{segment}' must be object typed")
 
             # does field exist - segment missing is a name error
-            if segment not in current_obj.fields:
+            if not isinstance(current_obj, BrewinObject) or segment not in current_obj.fields:
                 super().error(ErrorType.NAME_ERROR, f"Field '{segment} not found in object")
 
             current_obj = current_obj.fields[segment]
@@ -672,8 +737,12 @@ class BrewinReference:
 
     def set_value(self, value):
         if self.parent_obj is None:
-            if not self.env.set_value(self.varname, value):
-                raise ErrorType.NAME_ERROR(f"Internal error: Cannot set value for reference variable {self.varname}")
+            target_val = self.env.get_value(self.varname)
+            if isinstance(target_val, BrewinReference):
+                target_val.set_value(value)
+            else:
+                if not self.env.set_value(self.varname, value):
+                    raise ErrorType.NAME_ERROR(f"Internal error: Cannot set value for reference variable {self.varname}")
         else:
             self.parent_obj.fields[self.field_name] = value
 
