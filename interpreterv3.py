@@ -46,7 +46,7 @@ class Environment:
     def exists(self, varname):
         return self.get_var_info(varname) is not None
     
-    def get_value(self, varname, value):
+    def get_value(self, varname):
         info = self.get_var_info(varname)
         if info:
             return info['value']
@@ -146,6 +146,47 @@ class Interpreter(InterpreterBase):
         
         super().error(ErrorType.NAME_ERROR, f"Function {name} not found")
 
+    def get_locator(self, expr):
+        if expr.elem_types != self.QUALIFIED_NAME_NODE:
+            super().error(ErrorType.TYPE_ERROR, "Reference argument must be a variable or field")
+
+        dotted_name = expr.get("name")
+        path = dotted_name.split('.')
+        base_name = path[0]
+
+        if len(path) == 1:
+            if not self.env.exists(base_name):
+                super().error(ErrorType.NAME_ERROR, f"Variable '{base_name}' not defined")
+            return BrewinReference(self.env, base_name)
+        
+        # resolve parent object
+        current_obj = self.env.get_value(base_name)
+        base_info = self.env.get_var_info(base_name)
+
+        if base_info is None or base_info['type'] != 'object':
+            super().error(ErrorType.TYPE_ERROR, f"Base variable '{base_name}' is not object")
+
+        for i in range(1, len(path) - 1):
+            segment = path[i]
+            if current_obj is self.NIL_VALUE:
+                super().error(ErrorType.FAULT_ERROR, f"Cannot dereference through nil object at '{path[i-1]}' ")
+            
+            if segment not in current_obj.fields:
+                super().error(ErrorType.NAME_ERROR, f"Intermediate object field '{segment}' not found.")
+                        
+            # intermediate must be object
+            if self.get_var_type_from_name(segment) != 'object':
+                super().error(ErrorType.TYPE_ERROR, f"Intermediate field '{segment}' must be object typed ")
+
+            current_obj = current_obj.fields[segment]
+        
+        if current_obj is self.NIL_VALUE:
+            super().error(ErrorType.FAULT_ERROR, f"Cannot derefernece nil object at '{path[-2]}'")
+
+        final_field = path[-1]
+
+        return BrewinReference(self.env, base_name, current_obj, final_field)
+
     def validate_function_signature(self, name, fomral_args):
         return_type = self.get_return_type_from_name(name)
 
@@ -183,14 +224,15 @@ class Interpreter(InterpreterBase):
         except Return_Exception:
             pass
     
-    def __run_function(self, name, actual_args):
-        # function scope is pushed
-        self.env.push_scope()
+    def __run_function(self, name, arg_expressions):
+
+        actual_values = []
+        for expr in arg_expressions:
+            actual_values.append(self.__eval_expr(expr))
 
         actual_arg_types = []
-        for arg in actual_args:
-            arg_type = self.get_runtime_type(arg)
-            actual_arg_types.append(arg_type)
+        for val in actual_values:
+            actual_arg_types.append(self.get_runtime_type(val))
         
         # passing in tuple of types now
         func_ast = self.get_function(name, actual_arg_types)
@@ -203,12 +245,24 @@ class Interpreter(InterpreterBase):
         formal_args = func_ast.get("args") #initialize args - pass by value
         for i, formal_arg in enumerate(formal_args):
             var_name = formal_arg.get("name")
+            is_ref = formal_arg.get("ref")
             var_type = self.get_var_type_from_name(var_name)
             # fdef now stores var type and name
             if not self.env.fdef(var_type, var_name, self.FUNCTION_SCOPE):
-                super().error(ErrorType.NAME_ERROR(f"Paramter {var_name} already defined"))
+                super().error(ErrorType.NAME_ERROR, f"Paramter {var_name} already defined")
 
-            self.env.set_value(var_name, actual_args[i])
+            if is_ref:
+                locator = self.get_locator(arg_expressions[i])
+                ref_value = locator.get_value()
+                ref_type = self.get_runtime_type(ref_value)
+
+                if ref_type != var_type:
+                    super().error(ErrorType.TYPE_ERROR, f"Cannot pass reference of type {ref_type} to param '{var_name}' (expect a {ref_type})" )
+
+                self.env.set_value(var_name, locator)
+
+            else:
+                self.env.set_value(var_name, actual_values[i])
 
         return_value = self.get_default_value(return_type)
 
@@ -365,13 +419,13 @@ class Interpreter(InterpreterBase):
 ####
     def __run_fcall(self, statement):
         fcall_name = statement.get("name")
-        args = statement.get("args")
+        arg_expressions = statement.get("args")
 
-        actual_args = []
-        for arg_expr in args:
-            actual_args.append(self.__eval_expr(arg_expr))
-        arity = len(actual_args)
+        if fcall_name in ["inputi", "inputs", "print"]:
+            actual_args = [self.__eval_expr(expr) for expr in arg_expressions]
+            arity = len(actual_args)
 
+        ################
         if fcall_name == "inputi":
             if arity > 1:
                 super().error(ErrorType.NAME_ERROR, "too many arguments for inputi")
@@ -381,13 +435,13 @@ class Interpreter(InterpreterBase):
                     super().output(str(actual_args[0]).lower()) # true or false
                 else: 
                     super().output(str(actual_args[0]))
-
             try:
                 return int(super().get_input())
+        
             except (ValueError, TypeError):
                 super().error(ErrorType.TYPE_ERROR, "Invalid input of inputi, expected an integer")
 
-        if fcall_name == "inputs":
+        elif fcall_name == "inputs":
             if arity > 1:
                 super().error(ErrorType.NAME_ERROR, "Too many arguments for inputs")
 
@@ -410,8 +464,57 @@ class Interpreter(InterpreterBase):
                     out += str(arg)
             super().output(out)
             return self.NIL_VALUE
+        ########
+        actual_args = []
+        for arg_expr in arg_expressions:
+            actual_args.append(self.__eval_expr(arg_expr))
+        arity = len(actual_args)
         
+        if fcall_name in ["print", "inputi", "inputs"]:
+            for expr in arg_expressions:
+                actual_values = [self.__eval_expr(expr)]
+
         return self.__run_function(fcall_name, actual_args)
+    
+    def __run_convert(self, to_type, expr):
+
+        value = self.__eval_expr(expr)
+        from_type = self.get_runtime_type(value)
+
+        if from_type == 'object':
+            super().error(ErrorType.TYPE_ERROR, f"Cannot convert type '{from_type}' to '{to_type}'.")
+
+        # int conversions
+        if to_type == 'int':
+            if from_type == 'int':
+                return value # int -> int
+            if from_type == 'bool':
+                return 1 if value else 0
+            if from_type == 'string':
+                try:
+                    return int(value)
+                except ValueError:
+                    super().error(ErrorType.TYPE_ERROR, f"Invalid string format for conversion to int: '{value}'.")
+        
+        # string conversions
+        elif to_type == 'str':
+            if from_type == 'string':
+                return value # string -> string
+            if from_type == 'int':
+                return str(value) # int -> decimal string
+            if from_type == 'bool':
+                return str(value).lower()
+        
+        # bool conversions
+        elif to_type == 'bool':
+            if from_type == 'bool':
+                return value # bool -> bool
+            if from_type == 'int':
+                return value != 0 # int -> false iff 0
+            if from_type == 'string':
+                return len(value) > 0 # string -> false iff empty string ""
+        
+        super().error(ErrorType.TYPE_ERROR, f"Invalid conversion from {from_type} to {to_type}.")
 
     def __eval_expr(self, expr):
         kind = expr.elem_type
@@ -421,8 +524,7 @@ class Interpreter(InterpreterBase):
         elif kind == 'bool':
             return expr.get("val")
         elif kind == "nil":
-            return self.NIL_VALUE
-        
+            return self.NIL_VALUE 
         # handle variable lookup
         elif kind == self.QUALIFIED_NAME_NODE:
             var_name = expr.get("name")
@@ -442,12 +544,14 @@ class Interpreter(InterpreterBase):
         elif kind in self.ops:
             l, r = self.__eval_expr(expr.get("op1")), self.__eval_expr(expr.get("op2"))
             return self.__eval_binary_op(kind, l, r)
+        elif kind == 'convert':
+            return self.__run_convert(expr.get('to_type'), expr.get('expr'))
 
     def __resolve_dotted_name(self, dotted_name):
         path = dotted_name.split('.')
         base_name = path[0]
 
-        base_info = self.env.get_value(base_name)
+        base_info = self.env.get_var_info(base_name)
         if base_info is None:
             super().error(ErrorType.NAME_ERROR, f"Variable '{base_name}' not defined")
 
@@ -558,10 +662,20 @@ class BrewinReference:
         self.field_name = field_name
 
     def get_value(self):
-        pass
+        # value from reference location
+        if self.parent_obj is None: # variable
+            return self.env.get_value(self.varname)
+        else: # object
+            if self.field_name in self.parent_obj.fields:
+                return self.parent_obj.fields[self.field_name]
+            return self.env.NIL_VALUE
 
     def set_value(self, value):
-        pass
+        if self.parent_obj is None:
+            if not self.env.set_value(self.varname, value):
+                raise ErrorType.NAME_ERROR(f"Internal error: Cannot set value for reference variable {self.varname}")
+        else:
+            self.parent_obj.fields[self.field_name] = value
 
 def main():
     interpreter = Interpreter()
