@@ -6,10 +6,6 @@ class BrewinObject:
         self.fields = {}
 
 class BrewinReference:
-    """
-    Reference to a variable (env + name) or to an object field (obj + field).
-    get_value / set_value recursively unwrap nested references.
-    """
     def __init__(self, env, var=None, obj=None, field=None):
         self.env = env
         self.var = var
@@ -111,7 +107,6 @@ class Interpreter(InterpreterBase):
         self.NIL = None
         self.VOID = object()  # unique sentinel
 
-        # mapping from trailing suffix to static type name
         self.suffix_map = {
             'i': 'int',
             's': 'string',
