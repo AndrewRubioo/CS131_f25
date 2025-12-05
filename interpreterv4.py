@@ -127,7 +127,18 @@ class Interpreter(InterpreterBase):
     def declared_type(self, name):
         if not isinstance(name, str) or len(name) == 0:
             return None
-        return self.suffix_map.get(name[-1])
+        
+        last = name[-1]
+        if last == 'f':
+            return function
+        
+        if last in self.suffix_map:
+            return self.suffix_map[last]
+        
+        if last.isupper():
+            return ("interface", last)
+        
+        return None
 
     def return_type(self, fname):
         # Return type from function name (main is always void)
@@ -145,6 +156,8 @@ class Interpreter(InterpreterBase):
             return "object"
         if isinstance(val, BrewinReference):
             return self.runtime_type(val.get_value())
+        if isinstance(val, FunctionValue):
+            return "function"
         if isinstance(val, bool):
             return "bool"
         if isinstance(val, int):
@@ -220,14 +233,90 @@ class Interpreter(InterpreterBase):
         # save interface specification
         self.interfaces[name] = {"vars":var_fields, "funcs":func_fields}
 
+    def check_interface(self, iface_name, obj):
+        if obj is self.NIL: # allowed per spec
+            return True
+        
+        if not isinstance(obj, BrewinObject):
+            self.error(ErrorType.TYPE_ERROR, f"value does not satisfy interface {iface_name}")
+
+        iface = self.interfaces.get(iface_name)
+        for varname, tletter in iface["vars"].items():
+            if varname not in obj.fields:
+                self.error(ErrorType.TYPE_ERROR, f"object missing required field {varname}")
+
+            val = obj.fields[varname]
+            actual_type = self.runtime_type(val)
+
+            if tletter.isupper():
+                expected_type = "object"
+            else:
+                expected_type = self.suffix_map[tletter]
+            
+            if actual_type != expected_type:
+                self.error(ErrorType.TYPE_ERROR, f"field {varname} type mismatch")
+
+        # function fields
+        for fname, params in iface["funcs"].items():
+            if fname not in obj.fields:
+                self.error(ErrorType.TYPE_ERROR, f"object missing required method {fname}")
+
+            fnval = obj.fields[fname]
+
+            if not isinstance(fnval, FunctionValue)
+                self.error(ErrorType.TYPE_ERROR, f"field {fname} is not a function")
+            
+            fn_ast = fnval.fn_ast
+            formal_params = fn_ast.get("args")
+
+            if len(formal_params) != len(params):
+                self.error(ErrorType.TYPE_ERROR, f"object missing required method {fname}")
+            
+            # check each param type compatibility
+            for (iface_param, fn_param) in zip(params, formal_params):
+                # iface_param = (pname, tletter, is_ref)
+                ip_name, ip_letter, ip_ref = iface_param
+
+                fp_name = fn_param.get("name")
+                fp_ref = fn_param.get("ref")
+                fp_letter = fp_name[-1]
+
+                if ip_ref != fp_ref: # ref match exactly
+                    self.error(ErrorType.TYPE_ERROR, f"method {fname} ref mismatch")
+
+                # interface param wants interface B
+                if ip_letter.isupper():
+                    if fp_letter != ip_letter:
+                        self.error(ErrorType.TYPE_ERROR, f"method {fname} interface param mismatch")
+
+                # interface paran wants any object
+                elif ip_letter == 'o':
+                    if not (fp_letter == 'o' or fp_letter.isupper()):
+                        self.error(ErrorType.TYPE_ERROR, f"Method {fname} must accept object or interface")
+                else:
+                    if fp_letter != ip_letter:
+                        self.error(ErrorType.TYPE_ERROR, f"method {fname} param type mismatch")
+
+            return True
+            
+    # Lambdas and closures
+
+    def is_interface_type(self, declared_type):
+        return isinstance(declared_type, tuple) and (declared_type[0] == "interface")
+
     def param_sig(self, args):
         # return tuple of parameter static types from arg nodes
         sig = []
         for a in args:
-            t = self.declared_type(a.get("name"))
-            if t is None or t == "void":
+            dtype = self.declared_type(a.get("name"))
+            if dtype is None:
                 self.error(ErrorType.TYPE_ERROR, "invalid formal parameter type")
-            sig.append(t)
+            if self.is_interface_type(dtype):
+                sig.append("object")
+            else:
+                if dtype == "void":
+                    self.error(ErrorType.TYPE_ERROR, "formal paramter cannot be void")
+            sig.append(dtype)
         return tuple(sig)
 
     def run(self, program):
