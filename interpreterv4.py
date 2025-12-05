@@ -36,7 +36,6 @@ class BrewinReference:
 
 
 class Environment:
-
     def __init__(self):
         self.stack = []
 
@@ -98,21 +97,27 @@ class Interpreter(InterpreterBase):
     VAR_DEF_NODE = "vardef"
     BVAR_DEF_NODE = "bvardef"
 
+    INTERFACE_NODE = "interface"
+    FIELD_VAR_NODE = "field_var"
+    FIELD_FUNC_NODE = "field_func"
+
     def __init__(self, console_output=True, inp=None, trace_output=False):
         super().__init__(console_output, inp)
 
         self.env = Environment()
         self.funcs = {}  # (name, param_type_tuple) -> Function
+        self.interfaces = {} # "A" -> interface spec
 
         self.NIL = None
-        self.VOID = object()  # unique sentinel
+        self.VOID = object()
 
         self.suffix_map = {
             'i': 'int',
             's': 'string',
             'b': 'bool',
             'o': 'object',
-            'v': 'void'
+            'v': 'void',
+            'f': 'function'
         }
 
         self.binary_ops = {
@@ -159,6 +164,62 @@ class Interpreter(InterpreterBase):
 
     # Function table construction
 
+    def process_interfaces(self, iface_node):
+        name = iface_node.get("name")
+
+        if not isinstance(name, str) or len(name) != 1 or not name.isUpper:
+            self.error(ErrorType.NAME_ERROR, "invalid interface name")
+
+        if name in self.interfaces:
+            self.error(ErrorType.NAME_ERROR, "interface redeclared")
+
+        fields = iface_node.get("fields", [])
+
+        var_fields = {} 
+        func_fields = {} #funcname -> [ (param_name, type_letter, is_ref),]
+
+        seen = set()
+
+        for fld in fields:
+            ftype = fld.elem_type
+            fname = fld.get("name")
+
+            if fname in seen:
+                self.error(ErrorType.NAME_ERROR, "duplicate field in interface")
+            seen.add(fname)
+
+            if ftype == self.FIELD_VAR_NODE:
+                tletter = fname[-1]
+                if tletter not in self.suffix_map and not tletter.isUpper():
+                    self.error(ErrorType.TYPE_ERROR, "invalid type in interface field")
+                
+                var_fields[fname] = tletter
+
+            # field is function requriement
+            elif ftype == self.FIELD_FUNC_NODE:
+                params = []
+                for arg in fld.get("params"):
+                    pname = arg.get("name")
+                    is_ref = arg.get("ref")
+                    tletter = pname[-1]
+
+                    if not (tletter in self.suffix_map or tletter.isupper()):
+                        self.error(ErrorType.TYPE_ERROR, "invalid param type in interface func field")
+                    
+                    # check referenced interface types exist
+                    if tletter.isupper() and tletter not in self.interfaces:
+                        self.error(ErrorType.NAME_ERROR, "referenceed interface not defined")
+
+                    params.append((pname, tletter, is_ref))
+            
+                func_fields[fname] = params
+        
+            else:
+                self.error(ErrorType.TYPE_ERROR, "invalid field in interface")
+        
+        # save interface specification
+        self.interfaces[name] = {"vars":var_fields, "funcs":func_fields}
+
     def param_sig(self, args):
         # return tuple of parameter static types from arg nodes
         sig = []
@@ -170,6 +231,10 @@ class Interpreter(InterpreterBase):
         return tuple(sig)
 
     def run(self, program):
+        interfaces = ast.get("interfaces", [])
+        for iface_ast in interfaces:
+            self.process_interface(iface_ast)
+
         ast = parse_program(program)
 
         # build function table
