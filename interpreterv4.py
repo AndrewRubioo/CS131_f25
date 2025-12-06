@@ -1,6 +1,10 @@
 from intbase import InterpreterBase, ErrorType
 from brewparse import parse_program
 
+class ReturnSignal(Exception):
+    def __init__(self, value):
+        self.value = value
+
 class BrewinObject:
     def __init__(self):
         self.fields = {}
@@ -34,7 +38,6 @@ class BrewinReference:
         else:
             self.obj.fields[self.field] = value
 
-
 class Environment:
     def __init__(self):
         self.stack = []
@@ -53,44 +56,47 @@ class Environment:
         self.stack[-1].pop()
 
     def exists(self, name):
-        # does this name exist anywhere in the current function frame?
-        for scope in reversed(self.stack[-1]):
-            if name in scope:
-                return True
+        for frame in reversed(self.stack):
+            for scope in reversed(frame):
+                if name in scope:
+                    return True
         return False
 
     def define(self, name, value, is_block):
-        #Define a new name in function scope (var/params) or block scope (bvar)
         frame = self.stack[-1]
-        if is_block:
-            frame[-1][name] = value
-        else:
-            frame[0][name] = value
+        target_scope = frame[-1] if is_block else frame[0]
+        target_scope[name] = value
 
     def get(self, name):
-        for scope in reversed(self.stack[-1]):
-            if name in scope:
-                return scope[name]
+        for frame in reversed(self.stack):
+            for scope in reversed(frame):
+                    if name in scope:
+                        return scope[name]
         return None
 
     def set(self, name, value):
-        for scope in reversed(self.stack[-1]):
-            if name in scope:
-                scope[name] = value
-                return True
+        for frame in reversed(self.stack):
+            for scope in reversed(frame):
+                if name in scope:
+                    scope[name] = value
+                    return True
         return False
 
-class Function:
-    def __init__(self, ast):
-        self.name = ast.get("name")
-        self.args = ast.get("args")
-        self.statements = ast.get("statements")
+    def clone_env(self, env):
+        new_env = Environment()
+        new_env.stack = []
+        for frame in env.stack():
+            new_frame = []
+            for scope in frame:
+                new_frame.append(scope.copy())
+            new_env.stack.append(new_frame)
+        return new_env
 
-
-class ReturnSignal(Exception):
-    def __init__(self, value):
-        self.value = value
-
+class FunctionValue:
+    def __init__(self, fn_ast, closure_env=None, is_lambda=False):
+        self.fn_ast = fn_ast
+        self.closure_env = closure_env
+        self.is_lambda = is_lambda
 
 class Interpreter(InterpreterBase):
 
@@ -100,17 +106,17 @@ class Interpreter(InterpreterBase):
     INTERFACE_NODE = "interface"
     FIELD_VAR_NODE = "field_var"
     FIELD_FUNC_NODE = "field_func"
+    CLOSURE_NODE = "closure"
 
     def __init__(self, console_output=True, inp=None, trace_output=False):
         super().__init__(console_output, inp)
 
         self.env = Environment()
-        self.funcs = {}  # (name, param_type_tuple) -> Function
+        self.current_closure_env = None
+        self.funcs = {}  # (name, param_sig) -> FunctionValue
         self.interfaces = {} # "A" -> interface spec
-
-        self.NIL = None
+        self.NIL = object()
         self.VOID = object()
-
         self.suffix_map = {
             'i': 'int',
             's': 'string',
@@ -130,7 +136,7 @@ class Interpreter(InterpreterBase):
         
         last = name[-1]
         if last == 'f':
-            return function
+            return "function"
         
         if last in self.suffix_map:
             return self.suffix_map[last]
@@ -167,6 +173,10 @@ class Interpreter(InterpreterBase):
         return "object"
 
     def default(self, t):
+        if self.is_interface_type(t):
+            return self.NIL
+        if t == "function":
+            return self.NIL
         return {
             "int": 0,
             "string": "",
@@ -175,18 +185,32 @@ class Interpreter(InterpreterBase):
             "void": self.VOID
         }[t]
 
+    def clone_env(self, env):
+        new_env = Environment()
+        new_env.stack = []
+        for frame in env.stack:
+            new_frame = []
+            for scope in frame:
+                new_frame.append(scope.copy())
+            new_env.stack.append(new_frame)
+        return new_env
+
+    def make_lambda(self, fn_ast):
+        closure = self.clone_env(self.env)
+        return FunctionValue(fn_ast, closure_env=closure, is_lambda=True)
+
     # Function table construction
 
     def process_interfaces(self, iface_node):
         name = iface_node.get("name")
 
-        if not isinstance(name, str) or len(name) != 1 or not name.isUpper:
+        if not isinstance(name, str) or len(name) != 1 or not name.isupper():
             self.error(ErrorType.NAME_ERROR, "invalid interface name")
 
         if name in self.interfaces:
             self.error(ErrorType.NAME_ERROR, "interface redeclared")
 
-        fields = iface_node.get("fields", [])
+        fields = iface_node.get("fields") or []
 
         var_fields = {} 
         func_fields = {} #funcname -> [ (param_name, type_letter, is_ref),]
@@ -203,7 +227,7 @@ class Interpreter(InterpreterBase):
 
             if ftype == self.FIELD_VAR_NODE:
                 tletter = fname[-1]
-                if tletter not in self.suffix_map and not tletter.isUpper():
+                if tletter not in self.suffix_map and not tletter.isupper():
                     self.error(ErrorType.TYPE_ERROR, "invalid type in interface field")
                 
                 var_fields[fname] = tletter
@@ -263,7 +287,7 @@ class Interpreter(InterpreterBase):
 
             fnval = obj.fields[fname]
 
-            if not isinstance(fnval, FunctionValue)
+            if not isinstance(fnval, FunctionValue):
                 self.error(ErrorType.TYPE_ERROR, f"field {fname} is not a function")
             
             fn_ast = fnval.fn_ast
@@ -297,7 +321,7 @@ class Interpreter(InterpreterBase):
                     if fp_letter != ip_letter:
                         self.error(ErrorType.TYPE_ERROR, f"method {fname} param type mismatch")
 
-            return True
+        return True
             
     # Lambdas and closures
 
@@ -316,45 +340,47 @@ class Interpreter(InterpreterBase):
             else:
                 if dtype == "void":
                     self.error(ErrorType.TYPE_ERROR, "formal paramter cannot be void")
-            sig.append(dtype)
+                sig.append(dtype)
         return tuple(sig)
 
     def run(self, program):
-        interfaces = ast.get("interfaces", [])
-        for iface_ast in interfaces:
-            self.process_interface(iface_ast)
-
         ast = parse_program(program)
 
+        interfaces = ast.get("interfaces") or []
+        for iface_ast in interfaces:
+            self.process_interfaces(iface_ast)
+
         # build function table
-        for fn_ast in ast.get("functions"):
-            fn = Function(fn_ast)
+        for fn_ast in ast.get("functions") or []:
+
+            fname = fn_ast.get("name")
+            fargs = fn_ast.get("args")
 
             # validate function name / return type
-            if fn.name != "main":
-                rett = self.return_type(fn.name)
-                if rett not in ("int", "string", "bool", "object", "void"):
+            if fname != "main":
+                rettype = self.return_type(fname)
+                if rettype not in ("int", "string", "bool", "object", "void", "function") and not self.is_interface_type(rettype):
                     self.error(ErrorType.TYPE_ERROR, "invalid function return type")
 
-            sig = self.param_sig(fn.args)
+            sig = self.param_sig(fargs)
 
             # reject void-type formal params
-            for a in fn.args:
+            for a in fargs:
                 if self.declared_type(a.get("name")) == "void":
                     self.error(ErrorType.TYPE_ERROR, "formal parameter cannot be void")
 
-            key = (fn.name, sig)
+            key = (fname, sig)
             if key in self.funcs:
                 self.error(ErrorType.NAME_ERROR, "duplicate function definition")
-            self.funcs[key] = fn
+            self.funcs[key] = FunctionValue(fn_ast, is_lambda=False)
 
         if ("main", ()) not in self.funcs:
             self.error(ErrorType.NAME_ERROR, "main missing")
 
         try:
             self.run_function("main", [])
+
         except ReturnSignal:
-            # A return in main just terminates the program.
             pass
 
     def get_function(self, name, arg_types):
@@ -363,8 +389,157 @@ class Interpreter(InterpreterBase):
         if fn is None:
             self.error(ErrorType.NAME_ERROR, "function not found")
         return fn
-
+    
     # Built-ins + Function calls
+
+    def call_function_value(self, fnval, arg_exprs, method_self=None):
+        # Evaluate arguments in caller environment
+        caller_env = self.env
+        caller_closure_env = self.current_closure_env
+
+        actual_vals = [self.eval_expr(e) for e in arg_exprs]
+        arg_types = [self.runtime_type(v) for v in actual_vals]
+
+        if any(t == "void" for t in arg_types):
+            self.error(ErrorType.TYPE_ERROR, "cannot pass void as argument")
+
+        fn_ast = fnval.fn_ast
+        fname = fn_ast.get("name")
+        rettype = self.return_type(fname)
+
+        # Lambda uses closure, named functions use new env
+        if fnval.is_lambda:
+            self.env = self.clone_env(fnval.closure_env)
+            self.current_closure_env = fnval.closure_env
+        else:
+            self.env = Environment()
+            self.current_closure_env = None
+        self.env.enter_func()
+
+        # Inject selfo for methods
+        if method_self is not None:
+            self.env.define("selfo", method_self, is_block=False)
+
+        # Bind formal
+        fargs = fn_ast.get("args")
+        if len(fargs) != len(actual_vals):
+            self.env.exit_func()
+            self.env = caller_env
+            self.current_closure_env = caller_closure_env
+            self.error(ErrorType.TYPE_ERROR, "wrong number of arguments")
+
+        for formal, arg_expr, actual_val in zip(fargs, arg_exprs, actual_vals):
+            pname = formal.get("name")
+            ptype = self.declared_type(pname)
+            is_ref = formal.get("ref")
+            actual_type = self.runtime_type(actual_val)
+                                            
+            if self.env.exists(pname):
+                self.env.exit_func()
+                self.env = caller_env
+                self.current_closure_env = caller_closure_env
+                self.error(ErrorType.NAME_ERROR, "parameter name already defined")
+
+            if self.is_interface_type(ptype):
+                base_type = "object"
+            else:
+                base_type = ptype
+            
+            self.env.define(pname, self.default(base_type), is_block=False)
+
+            #Interface-typed parameter
+            if self.is_interface_type(ptype):
+                iface_letter = ptype[1]
+                if actual_type != "object":
+                    if actual_val is not self.NIL:
+                        self.env.exit_func()
+                        self.env = caller_env
+                        self.current_closure_env = caller_closure_env
+                        self.error(ErrorType.TYPE_ERROR, "passing non-object to interface param")
+
+                # enforce interface
+                self.check_interface(iface_letter, actual_val)
+            
+            # by-reference
+            if is_ref:
+                # build reference into caller's environment
+                locator = self.locate_reference(arg_expr, caller_env)
+                if not self.is_interface_type(ptype):
+                    if self.runtime_type(locator.get_value()) != base_type:
+                        self.env.exit_func()
+                        self.env = caller_env
+                        self.current_closure_env = caller_closure_env
+                        self.error(ErrorType.TYPE_ERROR, "reference parameter type mismatch")
+
+                else: 
+                    val_for_ref = locator.get_value()
+                    if self.runtime_type(val_for_ref) != "object":
+                        if val_for_ref is not self.NIL:
+                            self.env.exit_func()
+                            self.env = caller_env
+                            self.current_closure_env = caller_closure_env
+                            self.error(ErrorType.TYPE_ERROR, "reference param to interface must be object/nil")
+                    self.check_interface(ptype[1], val_for_ref)
+
+                self.env.set(pname, locator)
+            else:
+                if not self.is_interface_type(ptype):
+                    if actual_type != base_type:
+                        self.env.exit_func()
+                        self.env = caller_env
+                        self.error(ErrorType.TYPE_ERROR, "argument type mismatch")
+                self.env.set(pname, actual_val)
+
+        ret_val = self.default(rettype if not self.is_interface_type(rettype) else "object")
+
+        try:
+            for st in fn_ast.get('statements'):
+                self.exec_stmt(st)
+        except ReturnSignal as r:
+            val = r.value
+
+            if rettype == "void":
+                # void functions (including main) cannot return a value
+                if val is not self.VOID:
+                    self.env.exit_func()
+                    self.env = caller_env
+                    self.current_closure_env = caller_closure_env
+                    self.error(ErrorType.TYPE_ERROR, "void function cannot return a value")
+                ret_val = self.NIL
+
+            elif self.is_interface_type(rettype):
+                iface_letter = rettype[1]
+
+                rtype = self.runtime_type(val)
+                if rtype != "object":
+                    if val is not self.NIL:
+                        self.env.exit_func()
+                        self.env = caller_env
+                        self.current_closure_env = caller_closure_env
+                        self.error(ErrorType.TYPE_ERROR, "returning non-object to interface return")
+                self.check_interface(iface_letter, val)
+                ret_val = val
+
+            elif rettype == "function":
+                if self.runtime_type(val) != "function":
+                    self.env.exit_func()
+                    self.env = caller_env
+                    self.current_closure_env = caller_closure_env
+                    self.error(ErrorType.TYPE_ERROR, "return type mismatch (expected function)")
+                ret_val = val
+
+            else:
+                if rettype != self.runtime_type(val):
+                    self.env.exit_func()
+                    self.env = caller_env
+                    self.current_closure_env = caller_closure_env                 
+                    self.error(ErrorType.TYPE_ERROR, "return type mismatch")
+                ret_val = val
+
+        self.env.exit_func()
+        self.env = caller_env
+        self.current_closure_env = caller_closure_env
+        return ret_val
 
     def run_function(self, name, arg_exprs):
         if name in ("print", "inputi", "inputs"):
@@ -377,55 +552,9 @@ class Interpreter(InterpreterBase):
         if any(t == "void" for t in arg_types):
             self.error(ErrorType.TYPE_ERROR, "cannot pass void as argument")
 
-        fn = self.get_function(name, arg_types)
-        rettype = self.return_type(fn.name)
+        fnval = self.get_function(name, arg_types)
 
-        caller_env = self.env
-        self.env = Environment()
-        self.env.enter_func()
-
-        # Bind formal parameters
-        for formal, arg_expr, actual_val in zip(fn.args, arg_exprs, actual_vals):
-            pname = formal.get("name")
-            ptype = self.declared_type(pname)
-            is_ref = formal.get("ref")
-
-            # Parameters cannot clash inside this function
-            if self.env.exists(pname):
-                self.error(ErrorType.NAME_ERROR, "parameter name already defined")
-
-            self.env.define(pname, self.default(ptype), is_block=False)
-
-            if is_ref:
-                # build reference into caller's environment
-                locator = self.locate_reference(arg_expr, caller_env)
-                if self.runtime_type(locator.get_value()) != ptype:
-                    self.error(ErrorType.TYPE_ERROR, "reference parameter type mismatch")
-                self.env.set(pname, locator)
-            else:
-                self.env.set(pname, actual_val)
-
-        ret_val = self.default(rettype)
-
-        try:
-            for st in fn.statements:
-                self.exec_stmt(st)
-        except ReturnSignal as r:
-            val = r.value
-            if rettype == "void":
-                # void functions (including main) cannot return a value
-                if val is not self.VOID:
-                    self.error(ErrorType.TYPE_ERROR, "void function cannot return a value")
-                ret_val = self.NIL
-            else:
-                if val is self.VOID:
-                    val = self.default(rettype)
-                if self.runtime_type(val) != rettype:
-                    self.error(ErrorType.TYPE_ERROR, "return type mismatch")
-                ret_val = val
-
-        self.env = caller_env
-        return ret_val
+        return self.call_function_value(fnval, arg_exprs, method_self=None)
 
     def run_builtin(self, name, arg_exprs):
         actual_vals = [self.eval_expr(e) for e in arg_exprs]
@@ -496,7 +625,8 @@ class Interpreter(InterpreterBase):
 
         # traverse intermediates
         for seg in path[1:-1]:
-            if not seg.endswith("o"):
+            seg_decl = self.declared_type(seg)
+            if not (seg_decl == "object" or self.is_interface_type(seg_decl)):
                 self.error(ErrorType.TYPE_ERROR, "intermediate must be object-typed")
 
             nxt = cur.fields.get(seg)
@@ -526,8 +656,41 @@ class Interpreter(InterpreterBase):
             self.define_var(st, is_block=True)
         elif kind == "=":
             self.assign(st)
+
         elif kind == self.FCALL_NODE:
-            self.run_function(st.get("name"), st.get("args"))
+            fname = st.get("name")
+            args = st.get("args")
+
+            if "." not in fname:
+                if self.env.exists(fname):
+                    val = self.env.get(fname)
+                    if val is self.NIL:
+                        self.error(ErrorType.FAULT_ERROR, "calling nil function value")
+                    if isinstance(val, FunctionValue):
+                        self.call_function_value(val, args, method_self=None)
+                        return
+                    self.error(ErrorType.TYPE_ERROR, "calling non-function value")
+
+                self.run_function(fname, args)
+                return
+            parent, field = self.resolve_path(fname)
+            if parent is None:
+                self.error(ErrorType.TYPE_ERROR, "invalid method call base")
+                
+            if field not in parent.fields:
+                self.error(ErrorType.NAME_ERROR, "field not found in method call")
+
+            fnval = parent.fields[field]
+
+            if fnval is self.NIL:
+                self.error(ErrorType.FAULT_ERROR, "calling nil method value")
+
+            if not isinstance(fnval, FunctionValue):
+                self.error(ErrorType.TYPE_ERROR, "calling non-function field")
+
+            # method_self is the object that owns the field
+            self.call_function_value(fnval, args, method_self=parent)
+
         elif kind == self.RETURN_NODE:
             expr = st.get("expression")
             raise ReturnSignal(self.VOID if expr is None else self.eval_expr(expr))
@@ -542,10 +705,16 @@ class Interpreter(InterpreterBase):
         if t is None or t == "void":
             self.error(ErrorType.TYPE_ERROR, "invalid variable type")
 
-        # no shadowing within function
-        if self.env.exists(name):
-            self.error(ErrorType.NAME_ERROR, "variable already defined")
-
+        frame = self.env.stack[-1]
+        if is_block: # only forbid duplicates in the current block scope
+            current_scope = frame[-1]
+            if name in current_scope:
+                self.error(ErrorType.NAME_ERROR, "variable already defined")
+        else: # forbid duplicates in function-level scope
+            func_scope = frame[0]
+            if name in func_scope:
+                self.error(ErrorType.NAME_ERROR, "variable already defined")
+            
         self.env.define(name, self.default(t), is_block=is_block)
 
     def assign(self, st):
@@ -557,9 +726,20 @@ class Interpreter(InterpreterBase):
         if "." not in lhs:
             if not self.env.exists(lhs):
                 self.error(ErrorType.NAME_ERROR, "variable not defined")
+
             expected = self.declared_type(lhs)
-            if expected is None or expected == "void" or expected != rtype:
-                self.error(ErrorType.TYPE_ERROR, "type mismatch in assignment")
+
+            if self.is_interface_type(expected):
+                iface_letter = expected[1]
+
+                if rtype not in ("object",):
+                    if rval is not self.NIL:
+                        self.error(ErrorType.TYPE_ERROR, "assigning non-object to interface")
+                self.check_interface(iface_letter, rval)
+
+            else:
+                if expected != rtype:
+                    self.error(ErrorType.TYPE_ERROR, "type mismatch in assignment")
 
             target = self.env.get(lhs)
             if isinstance(target, BrewinReference):
@@ -572,12 +752,24 @@ class Interpreter(InterpreterBase):
         parent, field = self.resolve_path(lhs)
 
         # parent must be an object; resolve_path guarantees that
-        field_type = self.declared_type(field)
-        if field_type is None or field_type == "void":
-            self.error(ErrorType.TYPE_ERROR, "field name must end with valid type suffix")
+        field_declaration = self.declared_type(field)
 
-        if field_type != rtype:
-            self.error(ErrorType.TYPE_ERROR, "type mismatch in field assignment")
+        if self.is_interface_type(field_declaration):
+            iface_letter = field_declaration[1]
+
+            if rtype not in ("object",):
+                if rval is not self.NIL:
+                    self.error(ErrorType.TYPE_ERROR, "assign non-object to interface field")
+
+            self.check_interface(iface_letter, rval)
+        
+        elif field_declaration == "function":
+            if rtype != "function":
+                self.error(ErrorType.TYPE_ERROR, "assign non-function to function field")
+
+        else: #regular primitivr/object
+            if field_declaration != rtype:
+                self.error(ErrorType.TYPE_ERROR, "field type mismatch")
 
         parent.fields[field] = rval  # creates or updates
 
@@ -632,8 +824,9 @@ class Interpreter(InterpreterBase):
             return None, base
 
         # Dotted - base must be object-typed by name
-        if not base.endswith("o"):
-            self.error(ErrorType.TYPE_ERROR, "base must be object-typed")
+        # base_decl = self.declared_type(base)
+        # if not (base_decl == "object" or self.is_interface_type(base_decl)):
+        #     self.error(ErrorType.TYPE_ERROR, "base must be object-typed")
 
         if isinstance(val, BrewinReference):
             val = val.get_value()
@@ -647,8 +840,6 @@ class Interpreter(InterpreterBase):
 
         # traverse intermediates
         for seg in path[1:-1]:
-            if not seg.endswith("o"):
-                self.error(ErrorType.TYPE_ERROR, "intermediate must be object-typed")
 
             nxt = cur.fields.get(seg)
             if nxt is None:
@@ -668,7 +859,6 @@ class Interpreter(InterpreterBase):
 
     def eval_expr(self, e):
         k = e.elem_type
-
         # literals
         if k == self.INT_NODE:
             return e.get("val")
@@ -684,25 +874,80 @@ class Interpreter(InterpreterBase):
         # variable / field read
         if k == self.QUALIFIED_NAME_NODE:
             name = e.get("name")
+
+            if "." not in name:
+                # try variable
+                val = self.env.get(name)
+                if val is not None:
+                    if isinstance(val, BrewinReference):
+                        val = val.get_value()
+                    return val
+                
+                # # zero arg named functions
+                # matches = [fv for (fname, sig), fv in self.funcs.items()
+                #            if fname == name]
+                # if len(matches) == 1:
+                #     return matches[0]
+
+                # named function value
+                matches = [fv for (fname, sig), fv in self.funcs.items()
+                           if fname == name]
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    self.error(ErrorType.NAME_ERROR, "ambiguous function reference")
+                                     
+                # undefined
+                self.error(ErrorType.NAME_ERROR, "variable not defined")
+            
             parent, field = self.resolve_path(name)
-
             if parent is None:
-                # simple variable
-                val = self.env.get(field)
-                if val is None:
-                    self.error(ErrorType.NAME_ERROR, "variable not defined")
-            else:
-                if field not in parent.fields:
-                    self.error(ErrorType.NAME_ERROR, "field not found")
-                val = parent.fields[field]
+                self.error(ErrorType.TYPE_ERROR, "invalid field acess")
 
+            if field not in parent.fields:
+                self.error(ErrorType.NAME_ERROR, "field not found")
+
+            val = parent.fields[field]
             if isinstance(val, BrewinReference):
                 val = val.get_value()
             return val
 
         # function call expression
         if k == self.FCALL_NODE:
-            return self.run_function(e.get("name"), e.get("args"))
+            fname = e.get("name")
+            args = e.get("args")
+
+            if "." not in fname:
+                # If a variable of this name exists, try function-variable call
+                if self.env.exists(fname):
+                    val = self.env.get(fname)
+                    if val is self.NIL:
+                        self.error(ErrorType.FAULT_ERROR, "calling nil function value")
+                    if isinstance(val, FunctionValue):
+                        return self.call_function_value(val, args, method_self=None)
+                    # variable exists but is not a function
+                    self.error(ErrorType.TYPE_ERROR, "calling non-function value")
+
+                # No variable treat as named function
+                return self.run_function(fname, args)
+
+            parent, field = self.resolve_path(fname)
+            if parent is None:
+                self.error(ErrorType.TYPE_ERROR, "invalid method call base")
+
+            if field not in parent.fields:
+                self.error(ErrorType.NAME_ERROR, "method field not found")
+
+            fnval = parent.fields[field]
+
+            if fnval is self.NIL:
+                self.error(ErrorType.FAULT_ERROR, "calling nil method value")
+
+            if not isinstance(fnval, FunctionValue):
+                self.error(ErrorType.TYPE_ERROR, "calling non-function field")
+
+            # Perform method call
+            return self.call_function_value(fnval, args, method_self=parent)   
 
         # binary operators
         if k in self.binary_ops:
@@ -728,6 +973,24 @@ class Interpreter(InterpreterBase):
         if k == self.CONVERT_NODE:
             return self.convert(e)
 
+        if k == "func":
+            return self.make_lambda(e)
+        
+        if k == self.CLOSURE_NODE:
+            varname = e.get("args")
+            if self.current_closure_env is None:
+                self.error(ErrorType.NAME_ERROR, "closure has no environment")
+            
+            closure_env = self.current_closure_env
+
+            if not closure_env.exists(varname):
+                self.error(ErrorType.NAME_ERROR, "closure variable not found")
+
+            val = closure_env.get(varname)
+            if isinstance(val, BrewinReference):
+                val = val.get_value()
+            return val
+        
         self.error(ErrorType.TYPE_ERROR, "invalid expression")
 
     def binary_op(self, op, l, r):
@@ -736,6 +999,8 @@ class Interpreter(InterpreterBase):
 
         # equality/inequality
         if op == "==":
+            if isinstance(l,FunctionValue) and isinstance(r, FunctionValue):
+                return l is r
             # different types are never equal
             if tl != tr:
                 return False
