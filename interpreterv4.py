@@ -323,7 +323,7 @@ class Interpreter(InterpreterBase):
 
         return True
             
-    # Lambdas and closures
+    # Lambdas, Interfaces and closures
 
     def is_interface_type(self, declared_type):
         return isinstance(declared_type, tuple) and (declared_type[0] == "interface")
@@ -407,14 +407,18 @@ class Interpreter(InterpreterBase):
         fname = fn_ast.get("name")
         rettype = self.return_type(fname)
 
-        # Lambda uses closure, named functions use new env
+        # # Lambda uses closure, named functions use new env
         if fnval.is_lambda:
-            self.env = self.clone_env(fnval.closure_env)
+            # Use the stored closure environment directly so state persists
+            self.env = fnval.closure_env
             self.current_closure_env = fnval.closure_env
         else:
             self.env = Environment()
             self.current_closure_env = None
+
         self.env.enter_func()
+        frame = self.env.stack[-1]
+        func_scope = frame[0]
 
         # Inject selfo for methods
         if method_self is not None:
@@ -434,7 +438,7 @@ class Interpreter(InterpreterBase):
             is_ref = formal.get("ref")
             actual_type = self.runtime_type(actual_val)
                                             
-            if self.env.exists(pname):
+            if pname in func_scope:
                 self.env.exit_func()
                 self.env = caller_env
                 self.current_closure_env = caller_closure_env
@@ -610,10 +614,6 @@ class Interpreter(InterpreterBase):
         if len(path) == 1:
             return BrewinReference(caller_env, var=base)
 
-        # Dotted reference - base must be object-typed by name
-        if not base.endswith("o"):
-            self.error(ErrorType.TYPE_ERROR, "base must be object-typed")
-
         cur = base_val
         if isinstance(cur, BrewinReference):
             cur = cur.get_value()
@@ -625,9 +625,6 @@ class Interpreter(InterpreterBase):
 
         # traverse intermediates
         for seg in path[1:-1]:
-            seg_decl = self.declared_type(seg)
-            if not (seg_decl == "object" or self.is_interface_type(seg_decl)):
-                self.error(ErrorType.TYPE_ERROR, "intermediate must be object-typed")
 
             nxt = cur.fields.get(seg)
             if nxt is None:
@@ -638,13 +635,14 @@ class Interpreter(InterpreterBase):
 
             if nxt is self.NIL:
                 self.error(ErrorType.FAULT_ERROR, "nil dereference")
+                
             if not isinstance(nxt, BrewinObject):
                 self.error(ErrorType.TYPE_ERROR, "intermediate not object")
 
             cur = nxt
 
-        # final parent object is cur; final field name is path[-1]
         final_field = path[-1]
+
         return BrewinReference(caller_env, obj=cur, field=final_field)
 
     def exec_stmt(self, st):
@@ -738,8 +736,12 @@ class Interpreter(InterpreterBase):
                 self.check_interface(iface_letter, rval)
 
             else:
-                if expected != rtype:
-                    self.error(ErrorType.TYPE_ERROR, "type mismatch in assignment")
+                if expected == "function":
+                    if rval is not self.NIL and rtype != "function":
+                        self.error(ErrorType.TYPE_ERROR, "type mismatch in assignment")
+                else:
+                    if expected != rtype:
+                        self.error(ErrorType.TYPE_ERROR, "type mismatch in assignment")
 
             target = self.env.get(lhs)
             if isinstance(target, BrewinReference):
@@ -764,7 +766,7 @@ class Interpreter(InterpreterBase):
             self.check_interface(iface_letter, rval)
         
         elif field_declaration == "function":
-            if rtype != "function":
+            if rval is not self.NIL and rtype != "function":
                 self.error(ErrorType.TYPE_ERROR, "assign non-function to function field")
 
         else: #regular primitivr/object
@@ -823,11 +825,6 @@ class Interpreter(InterpreterBase):
         if len(path) == 1:
             return None, base
 
-        # Dotted - base must be object-typed by name
-        # base_decl = self.declared_type(base)
-        # if not (base_decl == "object" or self.is_interface_type(base_decl)):
-        #     self.error(ErrorType.TYPE_ERROR, "base must be object-typed")
-
         if isinstance(val, BrewinReference):
             val = val.get_value()
 
@@ -882,21 +879,13 @@ class Interpreter(InterpreterBase):
                     if isinstance(val, BrewinReference):
                         val = val.get_value()
                     return val
-                
-                # # zero arg named functions
-                # matches = [fv for (fname, sig), fv in self.funcs.items()
-                #            if fname == name]
-                # if len(matches) == 1:
-                #     return matches[0]
 
                 # named function value
                 matches = [fv for (fname, sig), fv in self.funcs.items()
                            if fname == name]
-                if len(matches) == 1:
-                    return matches[0]
-                if len(matches) > 1:
-                    self.error(ErrorType.NAME_ERROR, "ambiguous function reference")
-                                     
+                if matches:
+                    return matches[0]   
+                
                 # undefined
                 self.error(ErrorType.NAME_ERROR, "variable not defined")
             
